@@ -8,6 +8,8 @@
      that improve with each career-ops release.
      ============================================================ -->
 
+> **Scoring System:** This language mode inherits the scoring system from the English `modes/_shared.md`. Read `modes/_shared.md` for the authoritative 6-dimension weighted scoring system, scoring rules, report score table format, and calibration benchmarks. Any scoring section below is supplementary context only and does not override the English scoring rules.
+
 ## Fontes da Verdade (SEMPRE ler antes de cada avaliacao)
 
 | Arquivo | Caminho | Quando |
@@ -22,6 +24,8 @@
 **REGRA: Leia `_profile.md` DEPOIS deste arquivo. As personalizacoes do usuario em `_profile.md` sobrescrevem os valores padrao aqui.**
 
 ---
+
+> **DEPRECATED:** The scoring table below uses the legacy 5-dimension system. The current system uses 6 weighted dimensions defined in the English `modes/_shared.md`. This section is retained for language reference only.
 
 ## Sistema de Pontuacao
 

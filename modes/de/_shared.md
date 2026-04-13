@@ -11,6 +11,8 @@
      4. Die mit [ANPASSEN] markierten Abschnitte unten anpassen
      ============================================================ -->
 
+> **Scoring System:** This language mode inherits the scoring system from the English `modes/_shared.md`. Read `modes/_shared.md` for the authoritative 6-dimension weighted scoring system, scoring rules, report score table format, and calibration benchmarks. Any scoring section below is supplementary context only and does not override the English scoring rules.
+
 ## Quellen der Wahrheit (IMMER vor jeder Bewertung lesen)
 
 | Datei | Pfad | Wann |
