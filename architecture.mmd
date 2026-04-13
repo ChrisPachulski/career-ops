@@ -1,0 +1,111 @@
+%%{init: {"flowchart": {"defaultRenderer": "elk"}} }%%
+graph TD
+  subgraph "INTAKE"
+    direction LR
+    scan{{"Scan portals<br>scan.mjs -- Greenhouse, Ashby, Lever APIs"}}
+    manual[/"Manual paste<br>URL or raw JD text"/]
+    pipeline[("Pipeline inbox<br>data/pipeline.md")]
+    scan -->|"new URLs"| pipeline
+    manual -->|"direct entry"| pipeline
+  end
+
+  subgraph "IDENTITY"
+    direction LR
+    cv[/"cv.md<br>skills, experience, metrics"/]
+    profile[/"config/profile.yml<br>archetypes, narrative, comp targets"/]
+    digest[/"article-digest.md<br>proof points, case studies"/]
+  end
+
+  subgraph "EVALUATION ENGINE"
+    direction LR
+    classify{{"Archetype detection<br>6 archetypes -- AI Platform, Agentic,<br>Tech PM, Solutions Arch, FDE, Transformation"}}
+    blockA["A: Role Summary<br>domain, seniority, remote, team size"]
+    blockB["B: CV Match<br>JD reqs mapped to CV lines + gap analysis"]
+    blockC["C: Level Strategy<br>detected level vs candidate, sell-senior plan"]
+    blockD["D: Comp Research<br>Glassdoor, Levels.fyi, market context"]
+    blockE["E: Customization Plan<br>top 5 CV + top 5 LinkedIn changes"]
+    blockF["F: Interview Prep<br>6-10 STAR+R stories, case study, red flags"]
+    blockG["G: Posting Legitimacy<br>signals table -- age, apply button, repost pattern"]
+    classify --> blockA --> blockB --> blockC
+    blockC --> blockD --> blockE --> blockF --> blockG
+  end
+
+  subgraph "SCORING"
+    score{"Score 1-5<br>CV Match 30% + North Star 20%<br>+ Comp 15% + Culture 15% + Red Flags 20%"}
+    threshold{"Score >= 4.0?"}
+    score --> threshold
+  end
+
+  subgraph "OUTPUT"
+    direction LR
+    report[\"Report .md<br>reports/NNN-company-YYYY-MM-DD.md"/]
+    pdf[\"ATS PDF<br>Playwright + cv-template.html"/]
+    tsv[\"Tracker TSV<br>batch/tracker-additions/"/]
+  end
+
+  subgraph "BATCH SYSTEM"
+    direction LR
+    batchInput[/"batch-input.tsv<br>id, url, source"/]
+    runner{{"batch-runner.sh<br>5 parallel claude -p workers"}}
+    batchPrompt[/"batch-prompt.md<br>self-contained worker context"/]
+    batchState[("batch-state.tsv<br>id, status, report, error")]
+    batchInput --> runner
+    batchPrompt -.->|"injected"| runner
+    runner -->|"progress"| batchState
+  end
+
+  subgraph "TRACKING"
+    direction LR
+    tracker[("data/applications.md<br>master table -- all offers")]
+    merge{{"merge-tracker.mjs<br>dedup + insert"}}
+    verify{{"verify-pipeline.mjs<br>integrity checks"}}
+    dedup{{"dedup-tracker.mjs<br>fuzzy match cleanup"}}
+    merge --> tracker
+    tracker --> verify
+    tracker --> dedup
+  end
+
+  subgraph "INSIGHTS"
+    direction LR
+    patterns["analyze-patterns.mjs<br>archetype conversion, score thresholds"]
+    followup["followup-cadence.mjs<br>7d/3d/1d cadence, overdue flags"]
+    liveness["check-liveness.mjs<br>Playwright -- expired vs active"]
+    dashboard["Go TUI dashboard<br>Bubble Tea + Catppuccin Mocha<br>6 filter tabs, 4 sort modes"]
+  end
+
+  %% Cross-subgraph flows
+  pipeline -->|"pending URLs"| classify
+  cv -.->|"read at eval time"| blockB
+  profile -.->|"archetypes + narrative"| classify
+  digest -.->|"metrics + proof points"| blockB
+  blockG --> score
+  threshold -->|"yes: apply"| report
+  threshold -->|"no: SKIP"| report
+  threshold -->|"yes"| pdf
+  report --> tsv
+  runner -->|"per-job output"| tsv
+  tsv -->|"batch merge"| merge
+  tracker --> patterns
+  tracker --> followup
+  tracker --> dashboard
+  tracker -.->|"URL list"| liveness
+
+  %% Styles
+  classDef intake fill:#2a4858,stroke:#00f0ff,color:#e0e0e0
+  classDef identity fill:#3a2a4a,stroke:#ff00aa,color:#e0e0e0
+  classDef eval fill:#1a1a2a,stroke:#8888cc,color:#c0c0c0
+  classDef scoring fill:#3a3a1a,stroke:#ffcc00,color:#e0e0e0
+  classDef output fill:#1a3a2a,stroke:#00ff88,color:#e0e0e0
+  classDef batch fill:#2a4858,stroke:#00f0ff,color:#e0e0e0
+  classDef tracking fill:#3a2a4a,stroke:#ff00aa,color:#e0e0e0
+  classDef insights fill:#1a3a2a,stroke:#00ff88,color:#e0e0e0
+  classDef constraint fill:#2a1a1a,stroke:#ff4444,color:#c0c0c0
+
+  class scan,pipeline,manual intake
+  class cv,profile,digest identity
+  class classify,blockA,blockB,blockC,blockD,blockE,blockF,blockG eval
+  class score,threshold scoring
+  class report,pdf,tsv output
+  class batchInput,runner,batchPrompt,batchState batch
+  class tracker,merge,verify,dedup tracking
+  class patterns,followup,liveness,dashboard insights
