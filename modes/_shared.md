@@ -31,9 +31,9 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5, computed as a wei
 |-----------|--------|-------|-----------------|
 | **CV Match** | 25% | No | Skills, experience, proof points alignment to JD requirements. Assessed via requirement-to-evidence mapping in Block B. |
 | **Archetype Fit** | 20% | No | How well the role aligns with user's target archetypes from `_profile.md`. Perfect archetype match = 5.0; adjacent archetype = 3.0-4.0; wrong function < 2.5. |
-| **Comp Alignment** | 20% | No | Posted/inferred comp vs user's target from `config/profile.yml`. At or above target = 5.0; within 15% = 4.0; 15-30% gap = 3.0; 30%+ gap = 2.0. |
+| **Comp Alignment** | 20% | No | Posted/inferred comp vs user's target from `config/profile.yml`. At or above target = 5.0; 1-14% below = 4.0; 15-29% below = 3.0; 30%+ below = 2.0. |
 | **Level Fit** | 15% | No | Seniority match. Natural level = 5.0; one level up (stretch) = 4.0; one level down (negotiable) = 3.0; two+ levels mismatched = 2.0. |
-| **Org Risk** | 10% | No | Recent layoffs, Glassdoor rating, org stability, remote policy fit, location constraints. Clean signals = 5.0; mixed = 3.0; multiple red flags = 1.5. |
+| **Org Risk** | 10% | No | Recent layoffs, Glassdoor rating, org stability, remote policy fit, soft location preferences. Clean signals = 5.0; mixed = 3.0; multiple red flags = 1.5. Note: geographic impossibility (on-site only, candidate cannot relocate) is a Blocker, not an Org Risk signal. |
 | **Blockers** | 10% | **Yes** | Hard gaps: years of experience, specific domain requirements, certifications, citizenship. **Gate: any hard blocker caps global score at 2.5 max.** |
 
 ### Scoring Rules
@@ -45,6 +45,20 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5, computed as a wei
 5. Comp Alignment uses the user's target from `config/profile.yml`, not a generic "market rate"
 6. Archetype Fit reads archetypes from `modes/_profile.md` first, falls back to defaults above
 7. All 6 dimension scores MUST appear in the report score table
+
+### Blocker Gate Criteria
+
+A **hard blocker** is a requirement that cannot be addressed through experience framing, skill transfer, or on-the-job learning. The gate triggers when ANY of these conditions exist:
+
+- **Credentials:** Role requires a specific license, certification, or degree that the candidate does not hold and cannot obtain before the application deadline
+- **Citizenship/clearance:** Role requires citizenship, permanent residency, or security clearance the candidate does not have
+- **Years of experience:** Role states a minimum (e.g., "15+ years") and the candidate has less than 60% of it (e.g., < 9 years for a 15-year requirement)
+- **Domain lock-in:** Role requires deep domain expertise (e.g., "5+ years in adtech") in a domain the candidate has zero professional experience in
+- **Geographic impossibility:** Role is on-site only in a location the candidate cannot relocate to, with no remote option mentioned
+
+**Soft gaps** (do NOT trigger the gate): adjacent domain experience, missing 1-2 of many listed skills, seniority stretch (one level up), preferred-but-not-required qualifications.
+
+When the gate triggers, set the Blockers dimension to 1.0-2.0 based on severity (1.0 = absolute barrier, 2.0 = very difficult to overcome). The global score is then capped at 2.5 regardless of the weighted sum.
 
 ### Score Interpretation
 
@@ -80,7 +94,7 @@ Reference scores for consistency. When evaluating a new role, check if it resemb
 | Near-perfect | Anthropic | Prompt Engineer | 4.7 | Exact archetype + 80+ production skills + comp aligned |
 | Near-perfect | Anthropic | Economist | 4.8 | Rare econometrics + LLM infrastructure combo |
 | Strong | Dropbox | Staff Data | 4.4 | Strong CV match, minor culture flag |
-| Good | Anthropic | Finance Ops | 4.2 | Good fit, adjacent archetype |
+| Good | Anthropic | Analytics, Finance & Strategy | 4.2 | Good fit, adjacent archetype |
 | Decent + gaps | Reddit | Principal DS | 3.8 | Good match, no ads marketplace domain |
 | Moderate | Docker | Senior DS | 3.7 | Decent archetype, moderate gaps |
 | Below threshold | Stripe | Analytics | 3.4 | Good company, level concerns |
