@@ -27,6 +27,13 @@ modes/_profile.md
 node_modules/
 bun.lock
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
 # OS
 .DS_Store
 *.mov
