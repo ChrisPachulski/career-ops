@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scoring.models import OrgSignals, Requirement
+from scoring.models import Blocker, OrgSignals, Requirement
 
 
 def _effective_salary(
@@ -113,3 +113,9 @@ def score_org_risk(org_signals: OrgSignals) -> float:
     scores.append(org_signals.location_fit)
 
     return sum(scores) / len(scores)
+
+
+def score_blockers(blockers: list[Blocker]) -> float:
+    if not blockers:
+        return 5.0
+    return min(b.severity for b in blockers)

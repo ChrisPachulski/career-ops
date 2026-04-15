@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from scoring.engine import score_archetype_fit, score_comp_alignment, score_cv_match, score_level_fit, score_org_risk
-from scoring.models import OrgSignals, Requirement
+from scoring.engine import (
+    score_archetype_fit,
+    score_blockers,
+    score_comp_alignment,
+    score_cv_match,
+    score_level_fit,
+    score_org_risk,
+)
+from scoring.models import Blocker, OrgSignals, Requirement
 
 
 ###############################################################################
@@ -291,3 +298,28 @@ class TestScoreOrgRisk:
         # avg = (4.5+5.0+4.5+5.0+5.0)/5 = 24.0/5 = 4.8
         signals = self._signals(glassdoor_rating=4.5, recent_layoffs=False, org_stability=4.5)
         assert score_org_risk(signals) == pytest.approx(4.8)
+
+
+###############################################################################
+# score_blockers
+###############################################################################
+
+
+class TestScoreBlockers:
+    def _blocker(self, severity: float) -> Blocker:
+        return Blocker(type="domain", description="test blocker", severity=severity)
+
+    def test_no_blockers_returns_5(self):
+        assert score_blockers([]) == 5.0
+
+    def test_single_absolute_blocker(self):
+        assert score_blockers([self._blocker(1.0)]) == pytest.approx(1.0)
+
+    def test_single_difficult_blocker(self):
+        assert score_blockers([self._blocker(2.0)]) == pytest.approx(2.0)
+
+    def test_multiple_uses_min(self):
+        assert score_blockers([self._blocker(1.0), self._blocker(1.5)]) == pytest.approx(1.0)
+
+    def test_mid_severity(self):
+        assert score_blockers([self._blocker(1.5)]) == pytest.approx(1.5)
