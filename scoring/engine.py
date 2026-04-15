@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scoring.models import Requirement
+from scoring.models import OrgSignals, Requirement
 
 
 def _effective_salary(
@@ -89,3 +89,27 @@ def score_cv_match(requirements: list[Requirement]) -> float:
 
     raw = weighted_sum / total_weight
     return 1.0 + raw * 4.0
+
+
+_REMOTE_POLICY_SCORES = {
+    "remote": 5.0,
+    "hybrid": 4.0,
+    "onsite": 2.5,
+    "unknown": 3.0,
+}
+
+
+def score_org_risk(org_signals: OrgSignals) -> float:
+    scores: list[float] = []
+
+    if org_signals.glassdoor_rating is not None:
+        scores.append(org_signals.glassdoor_rating)
+
+    if org_signals.recent_layoffs is not None:
+        scores.append(2.0 if org_signals.recent_layoffs else 5.0)
+
+    scores.append(org_signals.org_stability)
+    scores.append(_REMOTE_POLICY_SCORES[org_signals.remote_policy])
+    scores.append(org_signals.location_fit)
+
+    return sum(scores) / len(scores)

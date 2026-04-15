@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from scoring.engine import score_archetype_fit, score_comp_alignment, score_cv_match, score_level_fit
-from scoring.models import Requirement
+from scoring.engine import score_archetype_fit, score_comp_alignment, score_cv_match, score_level_fit, score_org_risk
+from scoring.models import OrgSignals, Requirement
 
 
 ###############################################################################
@@ -211,3 +211,83 @@ class TestScoreCvMatch:
         # score = 1.0 + 0.5*4 = 3.0
         reqs = [self._req("must", 0.0), self._req("nice", 1.0), self._req("nice", 1.0), self._req("nice", 1.0)]
         assert score_cv_match(reqs) == pytest.approx(3.0)
+
+
+###############################################################################
+# score_org_risk
+###############################################################################
+
+
+class TestScoreOrgRisk:
+    def _signals(
+        self,
+        glassdoor_rating: float | None = None,
+        recent_layoffs: bool | None = None,
+        org_stability: float = 4.0,
+        remote_policy: str = "remote",
+        location_fit: float = 5.0,
+    ) -> OrgSignals:
+        return OrgSignals(
+            glassdoor_rating=glassdoor_rating,
+            recent_layoffs=recent_layoffs,
+            org_stability=org_stability,
+            remote_policy=remote_policy,
+            location_fit=location_fit,
+        )
+
+    def test_all_clean_high_scores(self):
+        # glassdoor=4.5, layoffs=False(5.0), stability=4.9, remote=5.0, location=5.0
+        # avg = (4.5+5.0+4.9+5.0+5.0)/5 = 24.4/5 = 4.88
+        signals = self._signals(glassdoor_rating=4.5, recent_layoffs=False, org_stability=4.9)
+        assert score_org_risk(signals) == pytest.approx(4.88)
+
+    def test_all_bad_low_scores(self):
+        # glassdoor=1.0, layoffs=True(2.0), stability=1.0, onsite=2.5, location=1.0
+        # avg = (1.0+2.0+1.0+2.5+1.0)/5 = 7.5/5 = 1.5
+        signals = self._signals(
+            glassdoor_rating=1.0, recent_layoffs=True, org_stability=1.0,
+            remote_policy="onsite", location_fit=1.0,
+        )
+        assert score_org_risk(signals) == pytest.approx(1.5)
+
+    def test_missing_glassdoor_and_layoffs(self):
+        # stability=3.0, remote=hybrid(4.0), location=4.0
+        # avg = (3.0+4.0+4.0)/3 = 11.0/3 = 3.6667
+        signals = self._signals(org_stability=3.0, remote_policy="hybrid", location_fit=4.0)
+        assert score_org_risk(signals) == pytest.approx(11.0 / 3.0)
+
+    def test_remote_policy_remote(self):
+        signals = self._signals(org_stability=3.0, remote_policy="remote", location_fit=3.0)
+        result = score_org_risk(signals)
+        # scores = [3.0, 5.0, 3.0]; avg = 11.0/3
+        assert result == pytest.approx(11.0 / 3.0)
+
+    def test_remote_policy_hybrid(self):
+        signals = self._signals(org_stability=3.0, remote_policy="hybrid", location_fit=3.0)
+        result = score_org_risk(signals)
+        # scores = [3.0, 4.0, 3.0]; avg = 10.0/3
+        assert result == pytest.approx(10.0 / 3.0)
+
+    def test_remote_policy_onsite(self):
+        signals = self._signals(org_stability=3.0, remote_policy="onsite", location_fit=3.0)
+        result = score_org_risk(signals)
+        # scores = [3.0, 2.5, 3.0]; avg = 8.5/3
+        assert result == pytest.approx(8.5 / 3.0)
+
+    def test_remote_policy_unknown(self):
+        signals = self._signals(org_stability=3.0, remote_policy="unknown", location_fit=3.0)
+        result = score_org_risk(signals)
+        # scores = [3.0, 3.0, 3.0]; avg = 3.0
+        assert result == pytest.approx(3.0)
+
+    def test_layoffs_true_penalizes(self):
+        # glassdoor=4.5, layoffs=True(2.0), stability=4.5, remote=5.0, location=5.0
+        # avg = (4.5+2.0+4.5+5.0+5.0)/5 = 21.0/5 = 4.2
+        signals = self._signals(glassdoor_rating=4.5, recent_layoffs=True, org_stability=4.5)
+        assert score_org_risk(signals) == pytest.approx(4.2)
+
+    def test_layoffs_false_rewards(self):
+        # glassdoor=4.5, layoffs=False(5.0), stability=4.5, remote=5.0, location=5.0
+        # avg = (4.5+5.0+4.5+5.0+5.0)/5 = 24.0/5 = 4.8
+        signals = self._signals(glassdoor_rating=4.5, recent_layoffs=False, org_stability=4.5)
+        assert score_org_risk(signals) == pytest.approx(4.8)
