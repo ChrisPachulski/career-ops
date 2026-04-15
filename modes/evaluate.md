@@ -142,6 +142,12 @@ Analyze the job posting for signals that indicate whether this is a real, active
 
 ---
 
+## Scoring
+
+After completing blocks A-F, extract JD features into the `JDFeatures` schema and run the scoring engine. See `modes/_shared.md` "Scoring System" section for the extraction and invocation workflow. The engine output includes the score table and interpretation -- use them directly in the report.
+
+---
+
 ## Post-evaluation
 
 **ALWAYS** after generating blocks A-G:

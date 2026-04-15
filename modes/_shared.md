@@ -25,7 +25,21 @@
 
 ## Scoring System
 
-The evaluation uses 6 blocks (A-F) with a global score of 1-5, computed as a weighted sum of 6 dimensions:
+The evaluation uses a deterministic Python scoring engine in `scoring/`. Claude's role is to extract structured features from the JD; the engine computes all scores.
+
+### How to Score
+
+After analyzing the JD (blocks A-F), extract features and run the engine:
+
+1. Fill a JSON object matching the `scoring.models.JDFeatures` schema (see `scoring/models.py` for field definitions)
+2. Write the JSON to a temp file
+3. Run: `python -m scoring.cli --input /tmp/jd-features.json`
+4. Read the ScoreResult JSON from stdout
+5. Use the `score_table` field directly in the report
+6. Use the `interpretation` field for the recommendation
+7. **Do NOT compute scores manually** -- the engine is the source of truth
+
+### Dimension Reference (for feature extraction)
 
 | Dimension | Weight | Gate? | What it measures |
 |-----------|--------|-------|-----------------|
@@ -35,16 +49,6 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5, computed as a wei
 | **Level Fit** | 15% | No | Seniority match. Natural level = 5.0; one level up (stretch) = 4.0; one level down (negotiable) = 3.0; two+ levels mismatched = 2.0. |
 | **Org Risk** | 10% | No | Recent layoffs, Glassdoor rating, org stability, remote policy fit, soft location preferences. Clean signals = 5.0; mixed = 3.0; multiple red flags = 1.5. Note: geographic impossibility (on-site only, candidate cannot relocate) is a Blocker, not an Org Risk signal. |
 | **Blockers** | 10% | **Yes** | Hard gaps: years of experience, specific domain requirements, certifications, citizenship. **Gate: any hard blocker caps global score at 2.5 max.** |
-
-### Scoring Rules
-
-1. Each dimension scored 1.0-5.0, one decimal place
-2. Global score = weighted sum, subject to Blocker gate
-3. Never round up to cross thresholds (3.49 stays below 3.5)
-4. Blocker gate is absolute -- even if CV Match is 5.0, a hard blocker caps global at 2.5
-5. Comp Alignment uses the user's target from `config/profile.yml`, not a generic "market rate"
-6. Archetype Fit reads archetypes from `modes/_profile.md` first, falls back to defaults above
-7. All 6 dimension scores MUST appear in the report score table
 
 ### Blocker Gate Criteria
 
@@ -66,24 +70,6 @@ When the gate triggers, set the Blockers dimension to 1.0-2.0 based on severity 
 - 4.0-4.4 -- Good match, worth applying
 - 3.5-3.9 -- Decent but not ideal, apply only if specific reason
 - Below 3.5 -- Recommend against applying (see Ethical Use in CLAUDE.md)
-
-### Report Score Table
-
-Every evaluation report MUST include this score breakdown table:
-
-```
-| Dimension      | Score | Weight | Weighted |
-|----------------|-------|--------|----------|
-| CV Match       | X.X   | 25%    | X.XX     |
-| Archetype Fit  | X.X   | 20%    | X.XX     |
-| Comp Alignment | X.X   | 20%    | X.XX     |
-| Level Fit      | X.X   | 15%    | X.XX     |
-| Org Risk       | X.X   | 10%    | X.XX     |
-| Blockers       | X.X   | 10%    | X.XX     |
-| **Global**     |       |        | **X.X/5**|
-```
-
-If Blocker gate is triggered, add below the table: `**Blocker gate active:** {description of hard blocker}. Global capped at 2.5.`
 
 ### Calibration Benchmarks
 
