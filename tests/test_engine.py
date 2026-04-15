@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from scoring.engine import score_archetype_fit, score_comp_alignment, score_level_fit
+from scoring.engine import score_archetype_fit, score_comp_alignment, score_cv_match, score_level_fit
+from scoring.models import Requirement
 
 
 ###############################################################################
@@ -156,3 +157,57 @@ class TestScoreArchetypeFit:
     def test_boundary_exactly_0_3(self):
         # adjacency=0.3: in [0.3, 0.6) range: 2.5 + 0.3*2.5 = 3.25
         assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.3) == pytest.approx(3.25)
+
+
+###############################################################################
+# score_cv_match
+###############################################################################
+
+
+class TestScoreCvMatch:
+    def _req(self, priority: str, match_strength: float) -> Requirement:
+        return Requirement(
+            text="dummy",
+            priority=priority,
+            match_strength=match_strength,
+            evidence="dummy",
+        )
+
+    def test_perfect_match_all_must_returns_5(self):
+        reqs = [self._req("must", 1.0), self._req("must", 1.0)]
+        assert score_cv_match(reqs) == pytest.approx(5.0)
+
+    def test_zero_match_all_must_returns_1(self):
+        reqs = [self._req("must", 0.0), self._req("must", 0.0)]
+        assert score_cv_match(reqs) == pytest.approx(1.0)
+
+    def test_mixed_priorities(self):
+        # must=1.0 (w=3), preferred=0.0 (w=2), nice=0.5 (w=1)
+        # weighted_sum = 1.0*3 + 0.0*2 + 0.5*1 = 3.5
+        # total_weight = 6; raw = 3.5/6 = 0.5833...
+        # score = 1.0 + 0.5833*4 = 3.3333...
+        reqs = [self._req("must", 1.0), self._req("preferred", 0.0), self._req("nice", 0.5)]
+        assert score_cv_match(reqs) == pytest.approx(1.0 + (3.5 / 6.0) * 4.0)
+
+    def test_empty_requirements_returns_3(self):
+        assert score_cv_match([]) == 3.0
+
+    def test_all_preferred_mixed(self):
+        # preferred=0.8 (w=2), preferred=0.6 (w=2)
+        # weighted_sum = 0.8*2 + 0.6*2 = 2.8; total_weight = 4; raw = 0.7
+        # score = 1.0 + 0.7*4 = 3.8
+        reqs = [self._req("preferred", 0.8), self._req("preferred", 0.6)]
+        assert score_cv_match(reqs) == pytest.approx(3.8)
+
+    def test_single_must_partial_match(self):
+        # must=0.5 (w=3); raw = 0.5; score = 1.0 + 0.5*4 = 3.0
+        reqs = [self._req("must", 0.5)]
+        assert score_cv_match(reqs) == pytest.approx(3.0)
+
+    def test_must_dominates_nice(self):
+        # must=0.0 (w=3), nice=1.0 x3 (w=1 each)
+        # weighted_sum = 0.0*3 + 1.0*1 + 1.0*1 + 1.0*1 = 3.0
+        # total_weight = 3+1+1+1 = 6; raw = 0.5
+        # score = 1.0 + 0.5*4 = 3.0
+        reqs = [self._req("must", 0.0), self._req("nice", 1.0), self._req("nice", 1.0), self._req("nice", 1.0)]
+        assert score_cv_match(reqs) == pytest.approx(3.0)

@@ -70,3 +70,22 @@ def score_archetype_fit(
     if archetype_adjacency < 0.3:
         return 1.0 + archetype_adjacency * 5.0
     return 2.5 + archetype_adjacency * 2.5
+
+
+_PRIORITY_WEIGHTS = {"must": 3, "preferred": 2, "nice": 1}
+
+
+def score_cv_match(requirements: list[Requirement]) -> float:
+    if not requirements:
+        return 3.0
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    for r in requirements:
+        w = _PRIORITY_WEIGHTS[r.priority]
+        weighted_sum += r.match_strength * w
+        total_weight += w
+
+    raw = weighted_sum / total_weight
+    return 1.0 + raw * 4.0
