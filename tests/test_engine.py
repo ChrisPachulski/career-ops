@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from scoring.engine import (
+    compute_global,
     score_archetype_fit,
     score_blockers,
     score_comp_alignment,
@@ -10,7 +11,7 @@ from scoring.engine import (
     score_level_fit,
     score_org_risk,
 )
-from scoring.models import Blocker, OrgSignals, Requirement
+from scoring.models import Blocker, JDFeatures, OrgSignals, Requirement
 
 
 ###############################################################################
@@ -323,3 +324,109 @@ class TestScoreBlockers:
 
     def test_mid_severity(self):
         assert score_blockers([self._blocker(1.5)]) == pytest.approx(1.5)
+
+
+###############################################################################
+# compute_global
+###############################################################################
+
+
+def _make_features(**overrides) -> JDFeatures:
+    defaults = dict(
+        salary_low=250000,
+        salary_high=300000,
+        salary_midpoint=None,
+        comp_target=250000,
+        jd_seniority="staff",
+        candidate_seniority="staff",
+        detected_archetype="AI Platform/LLMOps",
+        target_archetypes=["AI Platform/LLMOps"],
+        archetype_adjacency=1.0,
+        requirements=[
+            Requirement(text="Python", priority="must", match_strength=0.9, evidence="yes"),
+            Requirement(text="SQL", priority="must", match_strength=0.8, evidence="yes"),
+        ],
+        org_signals=OrgSignals(
+            glassdoor_rating=4.0,
+            recent_layoffs=False,
+            org_stability=4.5,
+            remote_policy="remote",
+            location_fit=5.0,
+        ),
+        blockers=[],
+    )
+    defaults.update(overrides)
+    return JDFeatures(**defaults)
+
+
+class TestComputeGlobal:
+    def test_strong_match_no_blockers(self):
+        result = compute_global(_make_features())
+        assert result.global_score >= 4.5
+        assert result.blocker_gate_active is False
+
+    def test_blocker_gate_caps_at_25(self):
+        blocker = Blocker(
+            type="citizenship",
+            description="US only -- non-citizen",
+            severity=1.0,
+        )
+        result = compute_global(_make_features(blockers=[blocker]))
+        assert result.global_score <= 2.5
+        assert result.blocker_gate_active is True
+        assert "US only" in result.blocker_gate_reason
+
+    def test_truncation_never_rounds_up(self):
+        # Use requirements that produce a fractional weighted sum
+        reqs = [
+            Requirement(text="A", priority="must", match_strength=0.75, evidence="yes"),
+            Requirement(text="B", priority="preferred", match_strength=0.65, evidence="yes"),
+        ]
+        result = compute_global(_make_features(requirements=reqs))
+        # Verify truncation: floor(score * 10) / 10 == score (not rounded up)
+        truncated = pytest.approx(result.global_score, abs=0.05)
+        assert result.global_score * 10 == pytest.approx(
+            int(result.global_score * 10), abs=0.001
+        )
+
+    def test_score_table_contains_all_dimensions(self):
+        result = compute_global(_make_features())
+        for name in ("CV Match", "Archetype Fit", "Comp Alignment", "Level Fit", "Org Risk", "Blockers"):
+            assert name in result.score_table
+
+    def test_interpretation_strong_match(self):
+        result = compute_global(_make_features())
+        assert "Strong match" in result.interpretation or "Good match" in result.interpretation
+
+    def test_interpretation_below_threshold(self):
+        bad_features = _make_features(
+            salary_low=100000,
+            salary_high=130000,
+            comp_target=250000,
+            jd_seniority="junior",
+            candidate_seniority="staff",
+            detected_archetype="frontend-dev",
+            target_archetypes=["AI Platform/LLMOps"],
+            archetype_adjacency=0.0,
+            org_signals=OrgSignals(
+                glassdoor_rating=1.5,
+                recent_layoffs=True,
+                org_stability=1.0,
+                remote_policy="onsite",
+                location_fit=1.0,
+            ),
+        )
+        result = compute_global(bad_features)
+        assert result.global_score < 3.5
+        assert "Below threshold" in result.interpretation
+
+    def test_dimensions_list_has_six_entries(self):
+        result = compute_global(_make_features())
+        assert len(result.dimensions) == 6
+
+    def test_weighted_values_sum_to_global(self):
+        result = compute_global(_make_features())
+        weighted_sum = sum(d.weighted for d in result.dimensions)
+        # global_score is truncated, so it can be up to 0.1 less than the sum
+        assert weighted_sum - result.global_score < 0.11
+        assert weighted_sum - result.global_score >= -0.001

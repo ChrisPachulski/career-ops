@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scoring.models import Blocker, OrgSignals, Requirement
+import math
+
+from scoring.models import Blocker, DimensionScore, JDFeatures, OrgSignals, Requirement, ScoreResult
 
 
 def _effective_salary(
@@ -119,3 +121,105 @@ def score_blockers(blockers: list[Blocker]) -> float:
     if not blockers:
         return 5.0
     return min(b.severity for b in blockers)
+
+
+###############################################################################
+# Global scoring
+###############################################################################
+
+_WEIGHTS = {
+    "CV Match": 0.25,
+    "Archetype Fit": 0.20,
+    "Comp Alignment": 0.20,
+    "Level Fit": 0.15,
+    "Org Risk": 0.10,
+    "Blockers": 0.10,
+}
+
+_INTERPRETATIONS = [
+    (4.5, "Strong match -- recommend applying immediately"),
+    (4.0, "Good match -- worth applying"),
+    (3.5, "Decent but not ideal -- apply only with specific reason"),
+    (0.0, "Below threshold -- recommend against applying"),
+]
+
+
+def _truncate_one_decimal(value: float) -> float:
+    return math.floor(value * 10) / 10
+
+
+def _format_score_table(dimensions: list[DimensionScore], global_score: float) -> str:
+    lines = [
+        "| Dimension | Score | Weight | Weighted |",
+        "|-----------|-------|--------|----------|",
+    ]
+    for d in dimensions:
+        pct = f"{int(d.weight * 100)}%"
+        lines.append(f"| {d.name} | {d.score:.1f} | {pct} | {d.weighted:.2f} |")
+    lines.append(f"| **Global** | | | **{global_score:.1f}/5** |")
+    return "\n".join(lines)
+
+
+def compute_global(features: JDFeatures) -> ScoreResult:
+    dim_scores = {
+        "CV Match": score_cv_match(features.requirements),
+        "Archetype Fit": score_archetype_fit(
+            features.detected_archetype,
+            features.target_archetypes,
+            features.archetype_adjacency,
+        ),
+        "Comp Alignment": score_comp_alignment(
+            features.salary_low,
+            features.salary_high,
+            features.comp_target,
+            salary_midpoint=features.salary_midpoint,
+        ),
+        "Level Fit": score_level_fit(
+            features.jd_seniority,
+            features.candidate_seniority,
+        ),
+        "Org Risk": score_org_risk(features.org_signals),
+        "Blockers": score_blockers(features.blockers),
+    }
+
+    dimensions = []
+    raw_global = 0.0
+
+    for name, score in dim_scores.items():
+        weight = _WEIGHTS[name]
+        weighted = round(score * weight, 4)
+        raw_global += weighted
+        dimensions.append(DimensionScore(
+            name=name,
+            score=round(score, 1),
+            weight=weight,
+            weighted=round(weighted, 2),
+            reasoning="",
+        ))
+
+    blocker_gate_active = len(features.blockers) > 0
+    blocker_gate_reason = None
+
+    if blocker_gate_active:
+        blocker_gate_reason = "; ".join(b.description for b in features.blockers)
+        raw_global = min(raw_global, 2.5)
+
+    global_score = _truncate_one_decimal(raw_global)
+    global_score = max(1.0, min(5.0, global_score))
+
+    interpretation = ""
+    for threshold, text in _INTERPRETATIONS:
+        if global_score >= threshold:
+            interpretation = text
+            break
+
+    score_table = _format_score_table(dimensions, global_score)
+
+    return ScoreResult(
+        dimensions=dimensions,
+        global_score=global_score,
+        blocker_gate_active=blocker_gate_active,
+        blocker_gate_reason=blocker_gate_reason,
+        interpretation=interpretation,
+        score_table=score_table,
+    )
