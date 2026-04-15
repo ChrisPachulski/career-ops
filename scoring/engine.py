@@ -39,5 +39,18 @@ def score_comp_alignment(
     return 2.0
 
 
+_LEVEL_ORDER = {
+    "junior": 0, "mid": 1, "senior": 2, "staff": 3,
+    "principal": 4, "director": 5, "vp": 6,
+}
+
+
 def score_level_fit(jd_seniority: str, candidate_seniority: str) -> float:
-    raise NotImplementedError
+    delta = _LEVEL_ORDER[jd_seniority] - _LEVEL_ORDER[candidate_seniority]
+    if delta == 0:
+        return 5.0
+    if delta == 1:
+        return 4.0
+    if delta == -1:
+        return 3.0
+    return 2.0
