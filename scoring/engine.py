@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from scoring.models import Requirement
+
 
 def _effective_salary(
     low: float | None,
@@ -54,3 +56,17 @@ def score_level_fit(jd_seniority: str, candidate_seniority: str) -> float:
     if delta == -1:
         return 3.0
     return 2.0
+
+
+def score_archetype_fit(
+    detected_archetype: str,
+    target_archetypes: list[str],
+    archetype_adjacency: float,
+) -> float:
+    if detected_archetype in target_archetypes:
+        return 5.0
+    if archetype_adjacency >= 0.6:
+        return min(3.0 + archetype_adjacency * 2.0, 4.5)
+    if archetype_adjacency < 0.3:
+        return 1.0 + archetype_adjacency * 5.0
+    return 2.5 + archetype_adjacency * 2.5

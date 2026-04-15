@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scoring.engine import score_comp_alignment, score_level_fit
+from scoring.engine import score_archetype_fit, score_comp_alignment, score_level_fit
 
 
 ###############################################################################
@@ -110,3 +110,49 @@ class TestScoreLevelFit:
     @pytest.mark.parametrize("level", ["junior", "mid", "senior", "staff", "principal", "director", "vp"])
     def test_all_seven_levels_exact_match(self, level):
         assert score_level_fit(level, level) == 5.0
+
+
+###############################################################################
+# score_archetype_fit
+###############################################################################
+
+
+class TestScoreArchetypeFit:
+    def test_exact_match_returns_5(self):
+        assert score_archetype_fit("ml-engineer", ["ml-engineer", "data-scientist"], 0.9) == 5.0
+
+    def test_exact_match_with_low_adjacency_still_5(self):
+        # Exact match always wins regardless of adjacency
+        assert score_archetype_fit("ml-engineer", ["ml-engineer"], 0.1) == 5.0
+
+    def test_adjacent_high_capped_at_4_5(self):
+        # adjacency=0.8: 3.0 + 0.8*2.0 = 4.6, capped at 4.5
+        assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.8) == 4.5
+
+    def test_adjacent_at_threshold_0_6(self):
+        # adjacency=0.6: 3.0 + 0.6*2.0 = 4.2
+        assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.6) == pytest.approx(4.2)
+
+    def test_middle_zone_0_45(self):
+        # adjacency=0.45: in [0.3, 0.6) range: 2.5 + 0.45*2.5 = 3.625
+        assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.45) == pytest.approx(3.625)
+
+    def test_wrong_function_low_0_1(self):
+        # adjacency=0.1 < 0.3: 1.0 + 0.1*5.0 = 1.5
+        assert score_archetype_fit("frontend-dev", ["ml-engineer"], 0.1) == pytest.approx(1.5)
+
+    def test_wrong_function_zero_adjacency(self):
+        # adjacency=0.0: 1.0 + 0.0*5.0 = 1.0
+        assert score_archetype_fit("frontend-dev", ["ml-engineer"], 0.0) == pytest.approx(1.0)
+
+    def test_boundary_just_below_0_6(self):
+        # adjacency=0.599: in [0.3, 0.6): 2.5 + 0.599*2.5 = 3.9975
+        assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.599) == pytest.approx(3.9975)
+
+    def test_boundary_just_below_0_3(self):
+        # adjacency=0.299 < 0.3: 1.0 + 0.299*5.0 = 2.495
+        assert score_archetype_fit("frontend-dev", ["ml-engineer"], 0.299) == pytest.approx(2.495)
+
+    def test_boundary_exactly_0_3(self):
+        # adjacency=0.3: in [0.3, 0.6) range: 2.5 + 0.3*2.5 = 3.25
+        assert score_archetype_fit("data-scientist", ["ml-engineer"], 0.3) == pytest.approx(3.25)
