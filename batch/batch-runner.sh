@@ -12,9 +12,10 @@ INPUT_FILE="$BATCH_DIR/batch-input.tsv"
 STATE_FILE="$BATCH_DIR/batch-state.tsv"
 PROMPT_FILE="$BATCH_DIR/batch-prompt.md"
 LOGS_DIR="$BATCH_DIR/logs"
-TRACKER_DIR="$BATCH_DIR/tracker-additions"
+INGEST_QUEUE_DIR="$BATCH_DIR/ingest-queue"
+BATCH_ACTIVE_FLAG="$BATCH_DIR/.batch-active"
 REPORTS_DIR="$PROJECT_DIR/reports"
-APPLICATIONS_FILE="$PROJECT_DIR/data/applications.md"
+DB_WRITE="$PROJECT_DIR/scripts/db-write.mjs"
 LOCK_FILE="$BATCH_DIR/batch-runner.pid"
 STATE_LOCK_DIR="$BATCH_DIR/.batch-state.lock"
 STATE_LOCK_PID_FILE="$STATE_LOCK_DIR/pid"
@@ -48,7 +49,8 @@ Files:
   batch-state.tsv      Processing state (auto-managed)
   batch-prompt.md      Prompt template for workers
   logs/                Per-offer logs
-  tracker-additions/   Tracker lines for post-batch merge
+  ingest-queue/        Per-worker JSON manifests drained into DuckDB after run
+  .batch-active        Flag file present while workers are running
 
 Examples:
   # Dry run to see pending offers
@@ -121,7 +123,7 @@ check_prerequisites() {
     exit 1
   fi
 
-  mkdir -p "$LOGS_DIR" "$TRACKER_DIR" "$REPORTS_DIR"
+  mkdir -p "$LOGS_DIR" "$INGEST_QUEUE_DIR" "$REPORTS_DIR"
 }
 
 # Initialize state file if it doesn't exist
@@ -319,7 +321,7 @@ process_offer() {
 
   # Build the prompt with placeholders replaced
   local prompt
-  prompt="Procesa esta oferta de empleo. Ejecuta el pipeline completo: evaluación A-F + report .md + PDF + tracker line."
+  prompt="Process this job offer. Execute the full pipeline: A-F evaluation + report .md + PDF + tracker line."
   prompt="$prompt URL: $url"
   prompt="$prompt JD file: $jd_file"
   prompt="$prompt Report number: $report_num"
@@ -381,14 +383,22 @@ process_offer() {
   fi
 }
 
-# Merge tracker additions into applications.md
-merge_tracker() {
+# Drain the ingest queue into DuckDB in a single transaction.
+# Workers never touch the DB directly (single-writer). They write
+# reports/{num}-...md plus batch/ingest-queue/{id}.json manifests;
+# the runner serializes those after all workers finish.
+drain_queue() {
   echo ""
-  echo "=== Merging tracker additions ==="
-  node "$PROJECT_DIR/merge-tracker.mjs"
+  echo "=== Draining ingest queue into DuckDB ==="
+  node "$DB_WRITE" drain-queue --queue-dir "$INGEST_QUEUE_DIR" || echo "WARN: drain-queue reported errors (see above)"
+
+  echo ""
+  echo "=== Reconciling tracker (SQL consistency job) ==="
+  node "$PROJECT_DIR/reconcile-tracker.mjs" || echo "WARN: reconcile-tracker reported errors (see above)"
+
   echo ""
   echo "=== Verifying pipeline integrity ==="
-  node "$PROJECT_DIR/verify-pipeline.mjs" || echo "⚠️  Verification found issues (see above)"
+  node "$PROJECT_DIR/verify-pipeline.mjs" || echo "WARN: Verification found issues (see above)"
 }
 
 # Print summary
@@ -532,6 +542,11 @@ main() {
     exit 0
   fi
 
+  # Signal that workers are running. While this flag is set, any hook or
+  # external tool watching reports/ should defer DB writes to the drainer.
+  touch "$BATCH_ACTIVE_FLAG"
+  trap 'rm -f "$BATCH_ACTIVE_FLAG"' EXIT
+
   # Process offers
   if (( PARALLEL <= 1 )); then
     # Sequential processing
@@ -575,8 +590,12 @@ main() {
     done
   fi
 
-  # Merge tracker additions
-  merge_tracker
+  # All workers done -- clear active flag before draining so the drainer
+  # runs without the defer-to-drainer signal.
+  rm -f "$BATCH_ACTIVE_FLAG"
+
+  # Drain the ingest queue into DuckDB
+  drain_queue
 
   # Print summary
   print_summary

@@ -124,6 +124,14 @@ Save the full report to `interview-prep/{company-slug}-{role-slug}.md` with this
 **Sources:** {N} Glassdoor reviews, {N} Blind posts, {N} other
 ```
 
+Then register the prep doc in DuckDB:
+
+```bash
+node scripts/db-write.mjs upsert-interview-prep --file interview-prep/{company-slug}-{role-slug}.md
+```
+
+The ingester parses company + role from the header, resolves the matching `applications.id`, and upserts the full body into the `interview_prep` table.
+
 ## Post-Research
 
 After delivering the report:

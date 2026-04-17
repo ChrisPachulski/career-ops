@@ -1,58 +1,34 @@
 #!/usr/bin/env node
 /**
- * dedup-tracker.mjs — Remove duplicate entries from applications.md
+ * dedup-tracker.mjs — Remove duplicate applications from the DuckDB tracker.
  *
- * Groups by normalized company + fuzzy role match.
- * Keeps entry with highest score. If discarded entry had more advanced status,
- * preserves that status. Merges notes.
+ * The unique index (lower(company), lower(role)) prevents exact duplicates at
+ * insert time. This script detects FUZZY duplicates — same company + roles
+ * with strong word overlap — and merges them.
  *
- * Run: node career-ops/dedup-tracker.mjs [--dry-run]
+ * For each cluster: keeps the row with highest score. If a loser has a more
+ * advanced status (Applied > Evaluated, Interview > Applied, etc.), promotes
+ * the winner's status. Merges notes. Deletes losers.
+ *
+ * Run: node dedup-tracker.mjs [--dry-run]
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'fs';
+import { Database } from 'duckdb-async';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { withLock } from './scripts/lockfile.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
-// Support both layouts: data/applications.md (boilerplate) and applications.md (original)
-const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
-  ? join(CAREER_OPS, 'data/applications.md')
-  : join(CAREER_OPS, 'applications.md');
+const DB_PATH = join(CAREER_OPS, 'data', 'career-ops.duckdb');
 const DRY_RUN = process.argv.includes('--dry-run');
 
-// Status advancement order (higher = more advanced in pipeline)
-// Aplicado > Rechazado because active application > terminal state
+// Higher rank = more advanced in pipeline. Applied > Rejected because active > terminal.
 const STATUS_RANK = {
-  // English canonicals (states.yml labels)
-  'skip': 0,
-  'discarded': 0,
-  'rejected': 1,
-  'evaluated': 2,
-  'applied': 3,
-  'responded': 4,
-  'interview': 5,
-  'offer': 6,
-  // Spanish aliases — kept for backwards compat with existing tracker data
-  'no_aplicar': 0,
-  'no aplicar': 0,
-  'descartado': 0,
-  'descartada': 0,
-  'rechazado': 1,  // Terminal — below active states
-  'rechazada': 1,
-  'evaluada': 2,
-  'aplicado': 3,
-  'respondido': 4,
-  'entrevista': 5,
-  'oferta': 6,
+  'SKIP': 0, 'Discarded': 0,
+  'Rejected': 1, 'Evaluated': 2,
+  'Applied': 3, 'Responded': 4,
+  'Interview': 5, 'Offer': 6,
 };
-
-function normalizeCompany(name) {
-  return name.toLowerCase()
-    .replace(/[()]/g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/[^a-z0-9 ]/g, '')
-    .trim();
-}
 
 function normalizeRole(role) {
   return role.toLowerCase()
@@ -62,145 +38,119 @@ function normalizeRole(role) {
     .trim();
 }
 
-function roleMatch(a, b) {
+function rolesMatch(a, b) {
   const wordsA = normalizeRole(a).split(/\s+/).filter(w => w.length > 3);
   const wordsB = normalizeRole(b).split(/\s+/).filter(w => w.length > 3);
   const overlap = wordsA.filter(w => wordsB.some(wb => wb.includes(w) || w.includes(wb)));
   return overlap.length >= 2;
 }
 
-function parseScore(s) {
-  const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
-  return m ? parseFloat(m[1]) : 0;
-}
+async function main() {
+  const db = await Database.create(DB_PATH);
 
-function parseAppLine(line) {
-  const parts = line.split('|').map(s => s.trim());
-  if (parts.length < 9) return null;
-  const num = parseInt(parts[1]);
-  if (isNaN(num)) return null;
-  return {
-    num,
-    date: parts[2],
-    company: parts[3],
-    role: parts[4],
-    score: parts[5],
-    status: parts[6],
-    pdf: parts[7],
-    report: parts[8],
-    notes: parts[9] || '',
-    raw: line,
-  };
-}
+  // Group by company
+  const byCompany = await db.all(`
+    SELECT lower(company) AS ck, list(id) AS ids
+    FROM applications
+    GROUP BY ck
+    HAVING count(*) > 1
+  `);
 
-// Read
-if (!existsSync(APPS_FILE)) {
-  console.log('No applications.md found. Nothing to dedup.');
-  process.exit(0);
-}
-const content = readFileSync(APPS_FILE, 'utf-8');
-const lines = content.split('\n');
-
-// Parse all entries
-const entries = [];
-const entryLineMap = new Map(); // num → line index
-
-for (let i = 0; i < lines.length; i++) {
-  if (!lines[i].startsWith('|')) continue;
-  const app = parseAppLine(lines[i]);
-  if (app && app.num > 0) {
-    entries.push(app);
-    entryLineMap.set(app.num, i);
+  if (byCompany.length === 0) {
+    console.log('No companies with multiple applications.');
+    await db.close();
+    return;
   }
-}
 
-console.log(`📊 ${entries.length} entries loaded`);
-
-// Group by company+role
-const groups = new Map();
-for (const entry of entries) {
-  const key = normalizeCompany(entry.company);
-  if (!groups.has(key)) groups.set(key, []);
-  groups.get(key).push(entry);
-}
-
-// Find duplicates
-let removed = 0;
-const linesToRemove = new Set();
-
-for (const [company, companyEntries] of groups) {
-  if (companyEntries.length < 2) continue;
-
-  // Within same company, find role matches
-  const processed = new Set();
-  for (let i = 0; i < companyEntries.length; i++) {
-    if (processed.has(i)) continue;
-    const cluster = [companyEntries[i]];
-    processed.add(i);
-
-    for (let j = i + 1; j < companyEntries.length; j++) {
-      if (processed.has(j)) continue;
-      if (roleMatch(companyEntries[i].role, companyEntries[j].role)) {
-        cluster.push(companyEntries[j]);
-        processed.add(j);
+  const clusters = [];
+  for (const { ids } of byCompany) {
+    const idList = ids.map(Number);
+    const rows = await db.all(
+      `SELECT id, company, role, score, CAST(status AS VARCHAR) AS status, notes
+       FROM applications WHERE id IN (${idList.map(() => '?').join(',')})`,
+      ...idList
+    );
+    const clustered = new Set();
+    for (let i = 0; i < rows.length; i++) {
+      if (clustered.has(rows[i].id)) continue;
+      const group = [rows[i]];
+      for (let j = i + 1; j < rows.length; j++) {
+        if (clustered.has(rows[j].id)) continue;
+        if (rolesMatch(rows[i].role, rows[j].role)) group.push(rows[j]);
       }
-    }
-
-    if (cluster.length < 2) continue;
-
-    // Keep the one with highest score
-    cluster.sort((a, b) => parseScore(b.score) - parseScore(a.score));
-    const keeper = cluster[0];
-
-    // Check if any removed entry has more advanced status
-    let bestStatusRank = STATUS_RANK[keeper.status.toLowerCase()] || 0;
-    let bestStatus = keeper.status;
-    for (let k = 1; k < cluster.length; k++) {
-      const rank = STATUS_RANK[cluster[k].status.toLowerCase()] || 0;
-      if (rank > bestStatusRank) {
-        bestStatusRank = rank;
-        bestStatus = cluster[k].status;
-      }
-    }
-
-    // Update keeper's status if a removed entry had a more advanced one
-    if (bestStatus !== keeper.status) {
-      const lineIdx = entryLineMap.get(keeper.num);
-      if (lineIdx !== undefined) {
-        const parts = lines[lineIdx].split('|').map(s => s.trim());
-        parts[6] = bestStatus;
-        lines[lineIdx] = '| ' + parts.slice(1, -1).join(' | ') + ' |';
-        console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${cluster.find(e => e.status === bestStatus)?.num})`);
-      }
-    }
-
-    // Remove duplicates
-    for (let k = 1; k < cluster.length; k++) {
-      const dup = cluster[k];
-      const lineIdx = entryLineMap.get(dup.num);
-      if (lineIdx !== undefined) {
-        linesToRemove.add(lineIdx);
-        removed++;
-        console.log(`🗑️  Remove #${dup.num} (${dup.company} — ${dup.role}, ${dup.score}) → kept #${keeper.num} (${keeper.score})`);
+      if (group.length > 1) {
+        for (const g of group) clustered.add(g.id);
+        clusters.push(group);
       }
     }
   }
+
+  if (clusters.length === 0) {
+    console.log('No fuzzy duplicates.');
+    await db.close();
+    return;
+  }
+
+  console.log(`Found ${clusters.length} duplicate clusters:`);
+  for (const c of clusters) {
+    console.log(`  Company: ${c[0].company}`);
+    for (const row of c) console.log(`    #${row.id} ${row.role} (${row.status}, score=${row.score})`);
+  }
+
+  if (DRY_RUN) {
+    console.log('\n(dry run — no changes)');
+    await db.close();
+    return;
+  }
+
+  await withLock(async () => {
+    for (const cluster of clusters) {
+      const sorted = [...cluster].sort((a, b) => {
+        const sa = Number(a.score ?? -1);
+        const sb = Number(b.score ?? -1);
+        return sb - sa;
+      });
+      const winner = sorted[0];
+      const losers = sorted.slice(1);
+      let bestStatus = winner.status;
+      let bestRank = STATUS_RANK[bestStatus] ?? 0;
+      const mergedNotes = [winner.notes, ...losers.map(l => `[merged from #${l.id}] ${l.notes ?? ''}`.trim())]
+        .filter(Boolean)
+        .join('; ');
+      for (const loser of losers) {
+        const rank = STATUS_RANK[loser.status] ?? 0;
+        if (rank > bestRank) { bestStatus = loser.status; bestRank = rank; }
+      }
+      await db.run('BEGIN TRANSACTION');
+      try {
+        await db.run(
+          `UPDATE applications SET status = ?::application_status, notes = ?, updated_at = now() WHERE id = ?`,
+          bestStatus, mergedNotes, winner.id
+        );
+        const loserIds = losers.map(l => l.id);
+        await db.run(
+          `DELETE FROM applications WHERE id IN (${loserIds.map(() => '?').join(',')})`,
+          ...loserIds
+        );
+        // Also drop any reports associated with losers (they're orphaned)
+        await db.run(
+          `DELETE FROM reports WHERE application_id IN (${loserIds.map(() => '?').join(',')})`,
+          ...loserIds
+        );
+        await db.run('COMMIT');
+        console.log(`  merged: kept #${winner.id} (status=${bestStatus}), deleted ${loserIds.map(i => '#'+i).join(', ')}`);
+      } catch (e) {
+        await db.run('ROLLBACK');
+        console.error(`  ERROR merging cluster: ${e.message}`);
+      }
+    }
+  }, { reason: 'dedup-tracker' });
+
+  await db.close();
+  console.log(`\nDone. ${clusters.length} clusters processed.`);
 }
 
-// Remove lines (in reverse order to preserve indices)
-const sortedRemoveIndices = [...linesToRemove].sort((a, b) => b - a);
-for (const idx of sortedRemoveIndices) {
-  lines.splice(idx, 1);
-}
-
-console.log(`\n📊 ${removed} duplicates removed`);
-
-if (!DRY_RUN && removed > 0) {
-  copyFileSync(APPS_FILE, APPS_FILE + '.bak');
-  writeFileSync(APPS_FILE, lines.join('\n'));
-  console.log('✅ Written to applications.md (backup: applications.md.bak)');
-} else if (DRY_RUN) {
-  console.log('(dry-run — no changes written)');
-} else {
-  console.log('✅ No duplicates found');
-}
+main().catch(err => {
+  console.error('Fatal:', err?.message || err);
+  process.exit(1);
+});

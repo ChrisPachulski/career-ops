@@ -230,9 +230,9 @@ search_queries:
     query: 'site:workatastartup.com "Applied AI" OR "AI Engineer" OR "AI Agent" remote Europe'
     enabled: true
 
-  # -- Spanish market specialized (high-value for Madrid/Barcelona-based candidates) --
+  # -- Spain market specialized (high-value for Madrid/Barcelona-based candidates) --
 
-  - name: Manfred — Tech Senior España
+  - name: Manfred — Spain Tech Senior
     query: 'site:getmanfred.com/en/job-offers "Solutions Architect" OR "DevRel" OR "Forward Deployed" OR "AI Engineer" OR "Founding"'
     enabled: true
 
@@ -240,12 +240,12 @@ search_queries:
     query: 'site:getmanfred.com "remote" "AI" OR "Senior" OR "Staff" OR "Lead"'
     enabled: true
 
-  - name: Tecnoempleo — España IT
+  - name: Tecnoempleo — Spain IT
     query: 'site:tecnoempleo.com "AI Engineer" OR "Solutions Architect" OR "DevRel" OR "Forward Deployed" OR "Founding Engineer"'
     enabled: true
 
-  - name: Tecnoempleo — Remoto Senior
-    query: 'site:tecnoempleo.com "remoto" OR "remote" Senior "AI" OR "Architect" OR "Lead"'
+  - name: Tecnoempleo — Remote Senior
+    query: 'site:tecnoempleo.com "remote" Senior "AI" OR "Architect" OR "Lead"'
     enabled: true
 
   - name: JobFluent — Spain startups
@@ -280,8 +280,8 @@ search_queries:
     query: 'site:himalayas.app "AI Engineer" OR "Solutions Architect" OR "Developer Advocate" OR "Forward Deployed" OR "Founding Engineer" Europe'
     enabled: true
 
-  - name: Jooble — España Tech Senior
-    query: 'site:jooble.org "AI Engineer" OR "Solutions Architect" OR "DevRel" Madrid OR remote España'
+  - name: Jooble — Spain Tech Senior
+    query: 'site:jooble.org "AI Engineer" OR "Solutions Architect" OR "DevRel" Madrid OR remote Spain'
     enabled: true
 
   - name: EU Data Jobs — AI/ML Europe

@@ -1,339 +1,126 @@
 #!/usr/bin/env node
 /**
- * followup-cadence.mjs — Follow-up Cadence Tracker for career-ops
+ * followup-cadence.mjs — Follow-up cadence tracker over the DuckDB store.
  *
- * Parses applications.md + follow-ups.md, calculates follow-up cadence
- * for active applications, extracts contacts, and flags overdue entries.
+ * Joins applications × follow_ups and classifies each actionable application
+ * (Applied / Responded / Interview) by urgency. Replaces the old
+ * markdown+follow-ups.md parser with a CTE + CASE over date arithmetic.
  *
- * Run: node followup-cadence.mjs             (JSON to stdout)
- *      node followup-cadence.mjs --summary   (human-readable dashboard)
+ * Cadence rules:
+ *   Applied,   no follow-up,      days_since >= APPLIED_FIRST           -> overdue
+ *   Applied,   >=1 follow-ups,    days_since_last_fu >= 7               -> overdue
+ *   Applied,   >= APPLIED_MAX_FU  follow-ups total                      -> cold
+ *   Responded, days_since_app == 0                                      -> urgent
+ *   Responded, days_since_app >= 3                                      -> overdue
+ *   Interview, days_since_app >= 1                                      -> overdue (thank-you)
+ *   otherwise                                                           -> waiting
+ *
+ * Run: node followup-cadence.mjs              (JSON)
+ *      node followup-cadence.mjs --summary    (human-readable)
  *      node followup-cadence.mjs --overdue-only
  *      node followup-cadence.mjs --applied-days 10
  */
 
-import { readFileSync, existsSync } from 'fs';
+import { Database } from 'duckdb-async';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
-const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
-  ? join(CAREER_OPS, 'data/applications.md')
-  : join(CAREER_OPS, 'applications.md');
-const FOLLOWUPS_FILE = join(CAREER_OPS, 'data/follow-ups.md');
+const DB_PATH = join(CAREER_OPS, 'data', 'career-ops.duckdb');
 
-
-// --- CLI args ---
 const args = process.argv.slice(2);
 const summaryMode = args.includes('--summary');
 const overdueOnly = args.includes('--overdue-only');
 const appliedDaysIdx = args.indexOf('--applied-days');
 const APPLIED_FIRST = appliedDaysIdx !== -1 ? parseInt(args[appliedDaysIdx + 1]) || 7 : 7;
+const APPLIED_MAX_FU = 2;
 
-// --- Cadence config ---
-const CADENCE = {
-  applied_first: APPLIED_FIRST,
-  applied_subsequent: 7,
-  applied_max_followups: 2,
-  responded_initial: 1,
-  responded_subsequent: 3,
-  interview_thankyou: 1,
-};
-
-// --- Status normalization (mirrors verify-pipeline.mjs) ---
-const ALIASES = {
-  'evaluada': 'evaluated', 'condicional': 'evaluated', 'hold': 'evaluated',
-  'evaluar': 'evaluated', 'verificar': 'evaluated',
-  'aplicado': 'applied', 'enviada': 'applied', 'aplicada': 'applied',
-  'applied': 'applied', 'sent': 'applied',
-  'respondido': 'responded',
-  'entrevista': 'interview',
-  'oferta': 'offer',
-  'rechazado': 'rejected', 'rechazada': 'rejected',
-  'descartado': 'discarded', 'descartada': 'discarded',
-  'cerrada': 'discarded', 'cancelada': 'discarded',
-  'no aplicar': 'skip', 'no_aplicar': 'skip', 'monitor': 'skip', 'geo blocker': 'skip',
-};
-
-const ACTIONABLE_STATUSES = ['applied', 'responded', 'interview'];
-
-function normalizeStatus(raw) {
-  const clean = raw.replace(/\*\*/g, '').trim().toLowerCase()
-    .replace(/\s+\d{4}-\d{2}-\d{2}.*$/, '').trim();
-  return ALIASES[clean] || clean;
-}
-
-// --- Date helpers ---
-function today() {
-  return new Date(new Date().toISOString().split('T')[0]);
-}
-
-function parseDate(dateStr) {
-  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim())) return null;
-  return new Date(dateStr.trim());
-}
-
-function daysBetween(d1, d2) {
-  return Math.floor((d2 - d1) / (1000 * 60 * 60 * 24));
-}
-
-function addDays(date, days) {
-  const result = new Date(date);
-  result.setUTCDate(result.getUTCDate() + days);
-  return result.toISOString().split('T')[0];
-}
-
-// --- Parse applications.md ---
-function parseTracker() {
-  if (!existsSync(APPS_FILE)) return [];
-  const content = readFileSync(APPS_FILE, 'utf-8');
-  const entries = [];
-  for (const line of content.split('\n')) {
-    if (!line.startsWith('|')) continue;
-    const parts = line.split('|').map(s => s.trim());
-    if (parts.length < 9) continue;
-    const num = parseInt(parts[1]);
-    if (isNaN(num)) continue;
-    entries.push({
-      num, date: parts[2], company: parts[3], role: parts[4],
-      score: parts[5], status: parts[6], pdf: parts[7], report: parts[8],
-      notes: parts[9] || '',
-    });
+async function main() {
+  if (!existsSync(DB_PATH)) {
+    console.error(`No database at ${DB_PATH}`);
+    process.exit(1);
   }
-  return entries;
-}
+  const db = await Database.create(DB_PATH);
 
-// --- Parse follow-ups.md ---
-function parseFollowups() {
-  if (!existsSync(FOLLOWUPS_FILE)) return [];
-  const content = readFileSync(FOLLOWUPS_FILE, 'utf-8');
-  const entries = [];
-  for (const line of content.split('\n')) {
-    if (!line.startsWith('|')) continue;
-    const parts = line.split('|').map(s => s.trim());
-    if (parts.length < 8) continue;
-    const num = parseInt(parts[1]);
-    if (isNaN(num)) continue;
-    entries.push({
-      num,
-      appNum: parseInt(parts[2]),
-      date: parts[3],
-      company: parts[4],
-      role: parts[5],
-      channel: parts[6],
-      contact: parts[7],
-      notes: parts[8] || '',
-    });
-  }
-  return entries;
-}
+  const rows = await db.all(`
+    WITH fu AS (
+      SELECT application_id,
+             count(*) AS fu_count,
+             max(follow_up_date) AS last_fu_date
+      FROM follow_ups
+      GROUP BY application_id
+    ),
+    joined AS (
+      SELECT a.id, a.company, a.role,
+             strftime(a.applied_date, '%Y-%m-%d') AS applied_date,
+             CAST(a.status AS VARCHAR) AS status,
+             a.notes,
+             coalesce(fu.fu_count, 0) AS followup_count,
+             CASE WHEN fu.last_fu_date IS NOT NULL
+                  THEN strftime(fu.last_fu_date, '%Y-%m-%d')
+                  ELSE NULL END AS last_followup_date,
+             date_diff('day', a.applied_date, current_date) AS days_since_app,
+             date_diff('day', fu.last_fu_date, current_date) AS days_since_last_fu
+      FROM applications a
+      LEFT JOIN fu ON fu.application_id = a.id
+      WHERE a.status IN ('Applied','Responded','Interview')
+    )
+    SELECT *,
+      CASE
+        WHEN status = 'Applied'   AND followup_count >= ? THEN 'cold'
+        WHEN status = 'Applied'   AND followup_count = 0 AND days_since_app >= ? THEN 'overdue'
+        WHEN status = 'Applied'   AND followup_count > 0 AND days_since_last_fu >= 7 THEN 'overdue'
+        WHEN status = 'Responded' AND days_since_app <= 0 THEN 'urgent'
+        WHEN status = 'Responded' AND days_since_app >= 3 THEN 'overdue'
+        WHEN status = 'Interview' AND days_since_app >= 1 THEN 'overdue'
+        ELSE 'waiting'
+      END AS urgency
+    FROM joined
+    ORDER BY applied_date
+  `, APPLIED_MAX_FU, APPLIED_FIRST);
 
-// --- Extract contacts from notes ---
-function extractContacts(notes) {
-  if (!notes) return [];
-  const contacts = [];
-  const emailRegex = /[\w.-]+@[\w.-]+\.\w+/g;
-  const emails = notes.match(emailRegex) || [];
-  for (const email of emails) {
-    // Try to extract name before email: "Emailed Name at" or "contact: Name"
-    let name = null;
-    const beforeEmail = notes.substring(0, notes.indexOf(email));
-    const nameMatch = beforeEmail.match(/(?:Emailed|emailed|contact[:\s]+|to\s+)([A-Z][a-z]+ ?[A-Z]?[a-z]*)\s*(?:at|@|$)/i);
-    if (nameMatch) name = nameMatch[1].trim();
-    contacts.push({ email, name });
-  }
-  return contacts;
-}
-
-// --- Resolve report path ---
-function resolveReportPath(reportField) {
-  const match = reportField.match(/\]\(([^)]+)\)/);
-  if (!match) return null;
-  const fullPath = join(CAREER_OPS, match[1]);
-  return existsSync(fullPath) ? match[1] : null;
-}
-
-// --- Compute urgency ---
-function computeUrgency(status, daysSinceApp, daysSinceLastFollowup, followupCount) {
-  if (status === 'applied') {
-    if (followupCount >= CADENCE.applied_max_followups) return 'cold';
-    if (followupCount === 0 && daysSinceApp >= CADENCE.applied_first) return 'overdue';
-    if (followupCount > 0 && daysSinceLastFollowup !== null && daysSinceLastFollowup >= CADENCE.applied_subsequent) return 'overdue';
-    return 'waiting';
-  }
-  if (status === 'responded') {
-    if (daysSinceApp < CADENCE.responded_initial) return 'urgent';
-    if (daysSinceApp >= CADENCE.responded_subsequent) return 'overdue';
-    return 'waiting';
-  }
-  if (status === 'interview') {
-    if (daysSinceApp >= CADENCE.interview_thankyou) return 'overdue';
-    return 'waiting';
-  }
-  return 'waiting';
-}
-
-// --- Compute next follow-up date ---
-function computeNextFollowupDate(status, appDate, lastFollowupDate, followupCount) {
-  if (status === 'applied') {
-    if (followupCount >= CADENCE.applied_max_followups) return null; // cold
-    if (followupCount === 0) return addDays(parseDate(appDate), CADENCE.applied_first);
-    if (lastFollowupDate) return addDays(parseDate(lastFollowupDate), CADENCE.applied_subsequent);
-    return addDays(parseDate(appDate), CADENCE.applied_first);
-  }
-  if (status === 'responded') {
-    if (lastFollowupDate) return addDays(parseDate(lastFollowupDate), CADENCE.responded_subsequent);
-    return addDays(parseDate(appDate), CADENCE.responded_subsequent);
-  }
-  if (status === 'interview') {
-    return addDays(parseDate(appDate), CADENCE.interview_thankyou);
-  }
-  return null;
-}
-
-// --- Main analysis ---
-function analyze() {
-  const apps = parseTracker();
-  if (apps.length === 0) {
-    return { error: 'No applications found in tracker.' };
-  }
-
-  const followups = parseFollowups();
-
-  // Group follow-ups by app number
-  const followupsByApp = new Map();
-  for (const fu of followups) {
-    if (!followupsByApp.has(fu.appNum)) followupsByApp.set(fu.appNum, []);
-    followupsByApp.get(fu.appNum).push(fu);
-  }
-
-  const now = today();
-  const entries = [];
-
-  for (const app of apps) {
-    const normalized = normalizeStatus(app.status);
-    if (!ACTIONABLE_STATUSES.includes(normalized)) continue;
-
-    const appDate = parseDate(app.date);
-    if (!appDate) continue;
-
-    const daysSinceApp = daysBetween(appDate, now);
-    const appFollowups = followupsByApp.get(app.num) || [];
-    const followupCount = appFollowups.length;
-
-    // Find most recent follow-up
-    let lastFollowupDate = null;
-    let daysSinceLastFollowup = null;
-    if (appFollowups.length > 0) {
-      const sorted = appFollowups.sort((a, b) => (a.date > b.date ? -1 : 1));
-      lastFollowupDate = sorted[0].date;
-      const lastDate = parseDate(lastFollowupDate);
-      if (lastDate) daysSinceLastFollowup = daysBetween(lastDate, now);
-    }
-
-    const urgency = computeUrgency(normalized, daysSinceApp, daysSinceLastFollowup, followupCount);
-    const nextFollowupDate = computeNextFollowupDate(normalized, app.date, lastFollowupDate, followupCount);
-    const nextDate = nextFollowupDate ? parseDate(nextFollowupDate) : null;
-    const daysUntilNext = nextDate ? daysBetween(now, nextDate) : null;
-
-    const contacts = extractContacts(app.notes);
-    const reportPath = resolveReportPath(app.report);
-
-    entries.push({
-      num: app.num,
-      date: app.date,
-      company: app.company,
-      role: app.role,
-      status: normalized,
-      score: app.score,
-      notes: app.notes,
-      reportPath,
-      contacts,
-      daysSinceApplication: daysSinceApp,
-      daysSinceLastFollowup,
-      followupCount,
-      urgency,
-      nextFollowupDate,
-      daysUntilNext,
-    });
-  }
-
-  // Sort by urgency priority: urgent > overdue > waiting > cold
-  const urgencyOrder = { urgent: 0, overdue: 1, waiting: 2, cold: 3 };
-  entries.sort((a, b) => (urgencyOrder[a.urgency] ?? 9) - (urgencyOrder[b.urgency] ?? 9));
+  const result = rows.map(r => ({
+    id: Number(r.id),
+    company: r.company,
+    role: r.role,
+    applied_date: r.applied_date,
+    status: r.status,
+    followup_count: Number(r.followup_count),
+    last_followup_date: r.last_followup_date,
+    days_since_app: Number(r.days_since_app),
+    days_since_last_fu: r.days_since_last_fu != null ? Number(r.days_since_last_fu) : null,
+    urgency: r.urgency,
+    notes: r.notes,
+  }));
 
   const filtered = overdueOnly
-    ? entries.filter(e => e.urgency === 'overdue' || e.urgency === 'urgent')
-    : entries;
+    ? result.filter(r => r.urgency === 'overdue' || r.urgency === 'urgent')
+    : result;
 
-  return {
-    metadata: {
-      analysisDate: now.toISOString().split('T')[0],
-      totalTracked: apps.length,
-      actionable: entries.length,
-      overdue: entries.filter(e => e.urgency === 'overdue').length,
-      urgent: entries.filter(e => e.urgency === 'urgent').length,
-      cold: entries.filter(e => e.urgency === 'cold').length,
-      waiting: entries.filter(e => e.urgency === 'waiting').length,
-    },
-    entries: filtered,
-    cadenceConfig: CADENCE,
-  };
+  await db.close();
+
+  if (summaryMode) {
+    const urgencyOrder = ['urgent', 'overdue', 'waiting', 'cold'];
+    const byUrg = {};
+    for (const r of filtered) (byUrg[r.urgency] ||= []).push(r);
+    console.log('\nFollow-up cadence:');
+    for (const urg of urgencyOrder) {
+      const list = byUrg[urg] || [];
+      if (list.length === 0) continue;
+      console.log(`\n  ${urg.toUpperCase()} (${list.length})`);
+      for (const r of list) {
+        console.log(`    #${r.id} ${r.company} — ${r.role} (${r.status}, applied ${r.applied_date}, ${r.days_since_app}d ago, ${r.followup_count} fu)`);
+      }
+    }
+    const totals = Object.entries(byUrg).map(([k, v]) => `${k}=${v.length}`).join(', ');
+    console.log(`\n  Totals: ${totals || 'none'}`);
+  } else {
+    console.log(JSON.stringify(filtered, null, 2));
+  }
 }
 
-// --- Summary mode ---
-function printSummary(result) {
-  if (result.error) {
-    console.log(`\n${result.error}\n`);
-    return;
-  }
-
-  const { metadata, entries } = result;
-
-  console.log(`\n${'='.repeat(70)}`);
-  console.log(`  Follow-up Cadence Dashboard — ${metadata.analysisDate}`);
-  console.log(`  ${metadata.totalTracked} total applications, ${metadata.actionable} actionable`);
-  console.log(`${'='.repeat(70)}\n`);
-
-  if (entries.length === 0) {
-    console.log('  No active applications to track. Apply to some roles first.\n');
-    return;
-  }
-
-  // Status summary
-  const urgencyIcon = { urgent: 'URGENT', overdue: 'OVERDUE', waiting: 'waiting', cold: 'COLD' };
-  console.log(`  ${metadata.urgent} urgent | ${metadata.overdue} overdue | ${metadata.waiting} waiting | ${metadata.cold} cold\n`);
-
-  // Table header
-  console.log('  ' + '#'.padEnd(5) + 'Company'.padEnd(16) + 'Status'.padEnd(12) + 'Days'.padEnd(6) + 'F/U'.padEnd(5) + 'Next'.padEnd(13) + 'Urgency'.padEnd(10) + 'Contact');
-  console.log('  ' + '-'.repeat(80));
-
-  for (const e of entries) {
-    const urgLabel = urgencyIcon[e.urgency] || e.urgency;
-    const nextStr = e.nextFollowupDate || '-';
-    const contactStr = e.contacts.length > 0 ? e.contacts[0].email : '-';
-    console.log(
-      '  ' +
-      String(e.num).padEnd(5) +
-      e.company.substring(0, 15).padEnd(16) +
-      e.status.padEnd(12) +
-      String(e.daysSinceApplication).padEnd(6) +
-      String(e.followupCount).padEnd(5) +
-      nextStr.padEnd(13) +
-      urgLabel.padEnd(10) +
-      contactStr
-    );
-  }
-
-  console.log('');
-}
-
-// --- Run ---
-const result = analyze();
-
-if (summaryMode) {
-  printSummary(result);
-} else {
-  console.log(JSON.stringify(result, null, 2));
-}
-
-if (result.error) process.exit(1);
+main().catch(err => {
+  console.error('Fatal:', err?.message || err);
+  process.exit(1);
+});

@@ -19,9 +19,17 @@ If the input is a **URL** (not pasted JD text), follow this strategy to extract 
 ## Step 1 -- A-G Evaluation
 Run exactly the same as the `evaluate` mode (read `modes/evaluate.md` for all blocks A-F + Block G Posting Legitimacy).
 
-## Step 2 -- Save Report .md
+## Step 2 -- Save Report .md and Register in DuckDB
 Save the full evaluation to `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (see format in `modes/evaluate.md`).
 Include Block G in the saved report. Add `**Legitimacy:** {tier}` to the report header.
+
+Immediately after writing the markdown, register it:
+
+```bash
+node scripts/db-write.mjs insert-report --file reports/{###}-{company-slug}-{YYYY-MM-DD}.md
+```
+
+The ingester parses the report header, inserts into `reports`, UPSERTs `applications`, links `latest_report_id`, and refreshes `data/dashboard.json`. **Do not manually edit `data/applications.md`.**
 
 ## Step 3 -- Generate PDF
 Run the full `pdf` pipeline (read `modes/pdf.md`).
@@ -62,7 +70,11 @@ If the final score is >= 4.5, generate draft answers for the application form:
 
 **Language**: Always in the language of the JD (EN default). Apply `/tech-translate`.
 
-## Step 5 -- Update Tracker
-Record in `data/applications.md` with all columns including Report and PDF marked as ✅.
+## Step 5 -- Tracker (auto-updated)
+The tracker row is already present in DuckDB from Step 2's ingester call. Step 3's PDF generator records `has_pdf = TRUE` and `pdf_id` on the same `applications` row. **Do not edit `data/applications.md`** -- it is a regenerated view. If you want to force-refresh the markdown snapshot, run:
 
-**If any step fails**, continue with the remaining steps and mark the failed step as pending in the tracker.
+```bash
+node scripts/db-write.mjs render-markdown applications
+```
+
+**If any step fails**, continue with the remaining steps. The ingester is idempotent; re-running `insert-report` on the same file updates rather than duplicates.

@@ -4,7 +4,15 @@
  * generate-pdf.mjs — HTML → PDF via Playwright
  *
  * Usage:
- *   node career-ops/generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4]
+ *   node career-ops/generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--application-id=N]
+ *
+ * If --application-id is passed, a ready-to-run
+ * `db-write.mjs insert-pdf` command is emitted on stdout so the caller can
+ * register the PDF in DuckDB as a follow-up step. The registration is NOT run
+ * automatically because on Windows the duckdb native binding crashes when it
+ * loads inside a child of a Playwright-hosting Node process
+ * (STATUS_STACK_BUFFER_OVERRUN / 0xC0000409). The two-step pattern is
+ * deliberately the same one used for report ingest.
  *
  * Requires: @playwright/test (or playwright) installed.
  * Uses Chromium headless to render the HTML and produce a clean, ATS-parseable PDF.
@@ -74,11 +82,13 @@ async function generatePDF() {
   const args = process.argv.slice(2);
 
   // Parse arguments
-  let inputPath, outputPath, format = 'a4';
+  let inputPath, outputPath, format = 'a4', applicationId = null;
 
   for (const arg of args) {
     if (arg.startsWith('--format=')) {
       format = arg.split('=')[1].toLowerCase();
+    } else if (arg.startsWith('--application-id=')) {
+      applicationId = arg.split('=')[1];
     } else if (!inputPath) {
       inputPath = arg;
     } else if (!outputPath) {
@@ -87,7 +97,7 @@ async function generatePDF() {
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4]');
+    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--application-id=N]');
     process.exit(1);
   }
 
@@ -163,9 +173,9 @@ async function generatePDF() {
     const pdfString = pdfBuffer.toString('latin1');
     const pageCount = (pdfString.match(/\/Type\s*\/Page[^s]/g) || []).length;
 
-    console.log(`✅ PDF generated: ${outputPath}`);
-    console.log(`📊 Pages: ${pageCount}`);
-    console.log(`📦 Size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
+    console.log(`PDF generated: ${outputPath}`);
+    console.log(`Pages: ${pageCount}`);
+    console.log(`Size: ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
 
     return { outputPath, pageCount, size: pdfBuffer.length };
   } finally {
@@ -173,7 +183,31 @@ async function generatePDF() {
   }
 }
 
-generatePDF().catch((err) => {
-  console.error('❌ PDF generation failed:', err.message);
+// registerPdfInDuckDB runs AFTER playwright/chromium have shut down. On
+// Windows, spawning a child that loads the duckdb native binding while a
+// Chromium helper process is still winding down crashes the child with
+// STATUS_STACK_BUFFER_OVERRUN (0xC0000409). Keeping this post-finally avoids
+// the race.
+// emitRegisterHint prints a ready-to-run db-write.mjs insert-pdf command.
+// The caller (mode script, batch runner, LLM agent) is responsible for
+// executing it -- see the header comment for why we do not run it in-process.
+function emitRegisterHint(outputPath, applicationId) {
+  console.log('Next step -- register the PDF in DuckDB:');
+  console.log(`  node scripts/db-write.mjs insert-pdf --application-id=${applicationId} --file=${outputPath}`);
+}
+
+generatePDF().then((result) => {
+  const args = process.argv.slice(2);
+  let applicationId = null;
+  for (const arg of args) {
+    if (arg.startsWith('--application-id=')) {
+      applicationId = arg.split('=')[1];
+    }
+  }
+  if (applicationId && result?.outputPath) {
+    emitRegisterHint(result.outputPath, applicationId);
+  }
+}).catch((err) => {
+  console.error('PDF generation failed:', err.message);
   process.exit(1);
 });

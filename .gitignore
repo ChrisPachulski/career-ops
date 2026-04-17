@@ -27,6 +27,16 @@ modes/_profile.md
 node_modules/
 bun.lock
 
+# DuckDB migration
+_archive/
+data/career-ops.duckdb
+data/career-ops.duckdb.wal
+data/dashboard.json
+data/.career-ops.lock
+data/backups/*.sql
+!data/backups/*-weekly.sql
+batch/ingest-queue/
+
 # Python
 __pycache__/
 *.pyc

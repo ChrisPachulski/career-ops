@@ -165,7 +165,7 @@ Analyze posting signals to assess whether this is a real, active opening.
 | Red flags | -X (if any) |
 | **Global** | **X/5** |
 
-### Step 3 — Save Report .md
+### Step 3 — Save Report .md + Queue for DB Ingest
 
 Save full evaluation to:
 ```
@@ -173,6 +173,17 @@ reports/{{REPORT_NUM}}-{company-slug}-{{DATE}}.md
 ```
 
 Where `{company-slug}` is the company name in lowercase, no spaces, with hyphens.
+
+Then write a manifest to the ingest queue so the batch runner can register it in DuckDB after all workers finish. Use atomic rename to avoid the drainer reading a half-written file:
+
+```bash
+cat > batch/ingest-queue/{{ID}}.json.tmp <<'JSON'
+{"kind": "report", "reportPath": "reports/{{REPORT_NUM}}-{company-slug}-{{DATE}}.md"}
+JSON
+mv batch/ingest-queue/{{ID}}.json.tmp batch/ingest-queue/{{ID}}.json
+```
+
+**Do NOT run `node scripts/db-write.mjs`** yourself. DuckDB is single-writer; the runner serializes all queue entries in one transaction after workers finish.
 
 **Report format:**
 
@@ -290,37 +301,11 @@ node generate-pdf.mjs \
 | `{{SECTION_SKILLS}}` | Skills / Competencias |
 | `{{SKILLS}}` | Skills HTML |
 
-### Step 5 — Tracker Line
+### Step 5 — Tracker Row (auto-created)
 
-Write a single TSV line to:
-```
-batch/tracker-additions/{{ID}}.tsv
-```
+You do NOT write a tracker line. The runner's `drain-queue` step reads your `batch/ingest-queue/{{ID}}.json`, parses the linked report's header fields (URL, Score, Legitimacy, Archetype, TL;DR, Remote, Comp, Batch ID), and UPSERTs the corresponding row into the `applications` table inside a single DB transaction. The report's `**Score:**`, `**Legitimacy:**`, and `**URL:**` header lines are the contract -- keep them canonical.
 
-TSV format (single line, no header, 9 tab-separated columns):
-```
-{next_num}\t{{DATE}}\t{company}\t{role}\t{status}\t{score}/5\t{pdf_emoji}\t[{{REPORT_NUM}}](reports/{{REPORT_NUM}}-{company-slug}-{{DATE}}.md)\t{one_line_note}
-```
-
-**TSV columns (exact order):**
-
-| # | Field | Type | Example | Validation |
-|---|-------|------|---------|------------|
-| 1 | num | int | `647` | Sequential, max existing + 1 |
-| 2 | date | YYYY-MM-DD | `2026-03-14` | Evaluation date |
-| 3 | company | string | `Datadog` | Short company name |
-| 4 | role | string | `Staff AI Engineer` | Role title |
-| 5 | status | canonical | `Evaluated` | MUST be canonical (see states.yml) |
-| 6 | score | X.XX/5 | `4.55/5` | Or `N/A` if not evaluable |
-| 7 | pdf | emoji | `✅` or `❌` | Whether PDF was generated |
-| 8 | report | md link | `[647](reports/647-...)` | Link to report |
-| 9 | notes | string | `APPLY HIGH...` | 1-sentence summary |
-
-**IMPORTANT:** The TSV order has status BEFORE score (col 5->status, col 6->score). In applications.md the order is reversed (col 5->score, col 6->status). merge-tracker.mjs handles the conversion.
-
-**Valid canonical states:** `Evaluated`, `Applied`, `Responded`, `Interview`, `Offer`, `Rejected`, `Discarded`, `SKIP`
-
-Where `{next_num}` is calculated by reading the last line of `data/applications.md`.
+**Valid canonical states** (written into the report header): `Evaluated`, `Applied`, `Responded`, `Interview`, `Offer`, `Rejected`, `Discarded`, `SKIP`.
 
 ### Step 6 — Final Output
 

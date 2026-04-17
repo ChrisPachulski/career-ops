@@ -1,30 +1,32 @@
 #!/usr/bin/env node
 
 /**
- * scan.mjs — Zero-token portal scanner
+ * scan.mjs — Zero-token portal scanner (DuckDB-backed)
  *
  * Fetches Greenhouse, Ashby, and Lever APIs directly, applies title
- * filters from portals.yml, deduplicates against existing history,
- * and appends new offers to pipeline.md + scan-history.tsv.
+ * and location filters from portals.yml, deduplicates against the
+ * DuckDB store, and inserts new offers into the pipeline + scan_history
+ * tables in a single transaction.
  *
- * Zero Claude API tokens — pure HTTP + JSON.
+ * Zero Claude API tokens — pure HTTP + JSON + SQL.
  *
  * Usage:
  *   node scan.mjs                  # scan all enabled companies
- *   node scan.mjs --dry-run        # preview without writing files
+ *   node scan.mjs --dry-run        # preview without writing to DB
  *   node scan.mjs --company Cohere # scan a single company
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
+import { Database } from 'duckdb-async';
+import { withLock } from './scripts/lockfile.mjs';
+
 const parseYaml = yaml.load;
-
-// ── Config ──────────────────────────────────────────────────────────
-
-const PORTALS_PATH = 'portals.yml';
-const SCAN_HISTORY_PATH = 'data/scan-history.tsv';
-const PIPELINE_PATH = 'data/pipeline.md';
-const APPLICATIONS_PATH = 'data/applications.md';
+const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+const PORTALS_PATH = join(CAREER_OPS, 'portals.yml');
+const DB_PATH = join(CAREER_OPS, 'data', 'career-ops.duckdb');
 
 const CONCURRENCY = 10;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -32,14 +34,12 @@ const FETCH_TIMEOUT_MS = 10_000;
 // ── API detection ───────────────────────────────────────────────────
 
 function detectApi(company) {
-  // Greenhouse: explicit api field
   if (company.api && company.api.includes('greenhouse')) {
     return { type: 'greenhouse', url: company.api };
   }
 
   const url = company.careers_url || '';
 
-  // Ashby
   const ashbyMatch = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)/);
   if (ashbyMatch) {
     return {
@@ -48,7 +48,6 @@ function detectApi(company) {
     };
   }
 
-  // Lever
   const leverMatch = url.match(/jobs\.lever\.co\/([^/?#]+)/);
   if (leverMatch) {
     return {
@@ -57,7 +56,6 @@ function detectApi(company) {
     };
   }
 
-  // Greenhouse EU boards
   const ghEuMatch = url.match(/job-boards(?:\.eu)?\.greenhouse\.io\/([^/?#]+)/);
   if (ghEuMatch && !company.api) {
     return {
@@ -117,7 +115,7 @@ async function fetchJson(url) {
   }
 }
 
-// ── Title filter ────────────────────────────────────────────────────
+// ── Title + location filters ────────────────────────────────────────
 
 function buildTitleFilter(titleFilter) {
   const positive = (titleFilter?.positive || []).map(k => k.toLowerCase());
@@ -131,99 +129,42 @@ function buildTitleFilter(titleFilter) {
   };
 }
 
-// ── Dedup ───────────────────────────────────────────────────────────
+function buildLocationFilter(locationFilter) {
+  if (!locationFilter) return () => ({ pass: true });
+  const accept = (locationFilter.accept_keywords || []).map(k => k.toLowerCase());
+  const reject = (locationFilter.reject_keywords || []).map(k => k.toLowerCase());
 
-function loadSeenUrls() {
-  const seen = new Set();
-
-  // scan-history.tsv
-  if (existsSync(SCAN_HISTORY_PATH)) {
-    const lines = readFileSync(SCAN_HISTORY_PATH, 'utf-8').split('\n');
-    for (const line of lines.slice(1)) { // skip header
-      const url = line.split('\t')[0];
-      if (url) seen.add(url);
-    }
-  }
-
-  // pipeline.md — extract URLs from checkbox lines
-  if (existsSync(PIPELINE_PATH)) {
-    const text = readFileSync(PIPELINE_PATH, 'utf-8');
-    for (const match of text.matchAll(/- \[[ x]\] (https?:\/\/\S+)/g)) {
-      seen.add(match[1]);
-    }
-  }
-
-  // applications.md — extract URLs from report links and any inline URLs
-  if (existsSync(APPLICATIONS_PATH)) {
-    const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
-    for (const match of text.matchAll(/https?:\/\/[^\s|)]+/g)) {
-      seen.add(match[0]);
-    }
-  }
-
-  return seen;
+  return (location) => {
+    if (!location) return { pass: true, reason: 'unknown_location' };
+    const lower = location.toLowerCase();
+    const matchedAccept = accept.some(k => lower.includes(k));
+    if (matchedAccept) return { pass: true, reason: 'accept_match' };
+    const matchedReject = reject.find(k => lower.includes(k));
+    if (matchedReject) return { pass: false, reason: `reject:${matchedReject}` };
+    return { pass: true, reason: 'no_match' };
+  };
 }
 
-function loadSeenCompanyRoles() {
-  const seen = new Set();
-  if (existsSync(APPLICATIONS_PATH)) {
-    const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
-    // Parse markdown table rows: | # | Date | Company | Role | ...
-    for (const match of text.matchAll(/\|[^|]+\|[^|]+\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|/g)) {
-      const company = match[1].trim().toLowerCase();
-      const role = match[2].trim().toLowerCase();
-      if (company && role && company !== 'company') {
-        seen.add(`${company}::${role}`);
-      }
-    }
-  }
-  return seen;
-}
+// ── Dedup: load existing URLs + company/role pairs from DB ──────────
 
-// ── Pipeline writer ─────────────────────────────────────────────────
+async function loadSeenSets(db) {
+  const urlRows = await db.all(`
+    SELECT url FROM pipeline
+    UNION
+    SELECT url FROM scan_history
+    UNION
+    SELECT url FROM applications WHERE url IS NOT NULL
+  `);
+  const seenUrls = new Set(urlRows.map(r => r.url));
 
-function appendToPipeline(offers) {
-  if (offers.length === 0) return;
+  const crRows = await db.all(`
+    SELECT lower(company) AS c, lower(title) AS r FROM pipeline
+    UNION
+    SELECT lower(company) AS c, lower(role) AS r FROM applications
+  `);
+  const seenCompanyRoles = new Set(crRows.map(r => `${r.c}::${r.r}`));
 
-  let text = readFileSync(PIPELINE_PATH, 'utf-8');
-
-  // Find "## Pendientes" section and append after it
-  const marker = '## Pendientes';
-  const idx = text.indexOf(marker);
-  if (idx === -1) {
-    // No Pendientes section — append at end before Procesadas
-    const procIdx = text.indexOf('## Procesadas');
-    const insertAt = procIdx === -1 ? text.length : procIdx;
-    const block = `\n${marker}\n\n` + offers.map(o =>
-      `- [ ] ${o.url} | ${o.company} | ${o.title}`
-    ).join('\n') + '\n\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
-  } else {
-    // Find the end of existing Pendientes content (next ## or end)
-    const afterMarker = idx + marker.length;
-    const nextSection = text.indexOf('\n## ', afterMarker);
-    const insertAt = nextSection === -1 ? text.length : nextSection;
-
-    const block = '\n' + offers.map(o =>
-      `- [ ] ${o.url} | ${o.company} | ${o.title}`
-    ).join('\n') + '\n';
-    text = text.slice(0, insertAt) + block + text.slice(insertAt);
-  }
-
-  writeFileSync(PIPELINE_PATH, text, 'utf-8');
-}
-
-function appendToScanHistory(offers, date) {
-  // Ensure file + header exist
-  if (!existsSync(SCAN_HISTORY_PATH)) {
-    writeFileSync(SCAN_HISTORY_PATH, 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\n', 'utf-8');
-  }
-
-  const lines = offers.map(o =>
-    `${o.url}\t${date}\t${o.source}\t${o.title}\t${o.company}\tadded`
-  ).join('\n') + '\n';
-
-  appendFileSync(SCAN_HISTORY_PATH, lines, 'utf-8');
+  return { seenUrls, seenCompanyRoles };
 }
 
 // ── Parallel fetch with concurrency limit ───────────────────────────
@@ -252,17 +193,21 @@ async function main() {
   const companyFlag = args.indexOf('--company');
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
 
-  // 1. Read portals.yml
   if (!existsSync(PORTALS_PATH)) {
     console.error('Error: portals.yml not found. Run onboarding first.');
+    process.exit(1);
+  }
+
+  if (!existsSync(DB_PATH)) {
+    console.error(`Error: ${DB_PATH} not found. Run: node scripts/init-db.mjs`);
     process.exit(1);
   }
 
   const config = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
+  const locationFilter = buildLocationFilter(config.location_filter);
 
-  // 2. Filter to enabled companies with detectable APIs
   const targets = companies
     .filter(c => c.enabled !== false)
     .filter(c => !filterCompany || c.name.toLowerCase().includes(filterCompany))
@@ -272,18 +217,18 @@ async function main() {
   const skippedCount = companies.filter(c => c.enabled !== false).length - targets.length;
 
   console.log(`Scanning ${targets.length} companies via API (${skippedCount} skipped — no API detected)`);
-  if (dryRun) console.log('(dry run — no files will be written)\n');
+  if (dryRun) console.log('(dry run — no DB writes)\n');
 
-  // 3. Load dedup sets
-  const seenUrls = loadSeenUrls();
-  const seenCompanyRoles = loadSeenCompanyRoles();
+  const db = await Database.create(DB_PATH);
+  const { seenUrls, seenCompanyRoles } = await loadSeenSets(db);
 
-  // 4. Fetch all APIs
   const date = new Date().toISOString().slice(0, 10);
   let totalFound = 0;
-  let totalFiltered = 0;
+  let totalTitleFiltered = 0;
+  let totalLocationFiltered = 0;
   let totalDupes = 0;
   const newOffers = [];
+  const skippedLocation = [];
   const errors = [];
 
   const tasks = targets.map(company => async () => {
@@ -295,7 +240,7 @@ async function main() {
 
       for (const job of jobs) {
         if (!titleFilter(job.title)) {
-          totalFiltered++;
+          totalTitleFiltered++;
           continue;
         }
         if (seenUrls.has(job.url)) {
@@ -307,7 +252,13 @@ async function main() {
           totalDupes++;
           continue;
         }
-        // Mark as seen to avoid intra-scan dupes
+        const locResult = locationFilter(job.location);
+        if (!locResult.pass) {
+          totalLocationFiltered++;
+          skippedLocation.push({ ...job, source: `${type}-api`, reason: locResult.reason });
+          seenUrls.add(job.url);
+          continue;
+        }
         seenUrls.add(job.url);
         seenCompanyRoles.add(key);
         newOffers.push({ ...job, source: `${type}-api` });
@@ -319,26 +270,56 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
 
-  // 5. Write results
-  if (!dryRun && newOffers.length > 0) {
-    appendToPipeline(newOffers);
-    appendToScanHistory(newOffers, date);
+  if (!dryRun && (newOffers.length > 0 || skippedLocation.length > 0)) {
+    await withLock(async () => {
+      await db.run('BEGIN TRANSACTION');
+      try {
+        for (const o of newOffers) {
+          await db.run(
+            `INSERT INTO pipeline (url, company, title, source, added_at)
+             VALUES (?, ?, ?, ?, now())
+             ON CONFLICT (url) DO NOTHING`,
+            o.url, o.company, o.title, o.source
+          );
+          await db.run(
+            `INSERT INTO scan_history (url, scan_date, portal, title, company, location, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'added'::scan_status)
+             ON CONFLICT (url) DO UPDATE SET last_seen_at = now()`,
+            o.url, date, o.source, o.title, o.company, o.location || null
+          );
+        }
+        for (const o of skippedLocation) {
+          await db.run(
+            `INSERT INTO scan_history (url, scan_date, portal, title, company, location, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'skipped'::scan_status)
+             ON CONFLICT (url) DO UPDATE SET last_seen_at = now()`,
+            o.url, date, o.source, o.title, o.company, o.location || null
+          );
+        }
+        await db.run('COMMIT');
+      } catch (e) {
+        await db.run('ROLLBACK');
+        throw e;
+      }
+    }, { reason: 'scan' });
   }
 
-  // 6. Print summary
+  await db.close();
+
   console.log(`\n${'━'.repeat(45)}`);
   console.log(`Portal Scan — ${date}`);
   console.log(`${'━'.repeat(45)}`);
-  console.log(`Companies scanned:     ${targets.length}`);
-  console.log(`Total jobs found:      ${totalFound}`);
-  console.log(`Filtered by title:     ${totalFiltered} removed`);
-  console.log(`Duplicates:            ${totalDupes} skipped`);
-  console.log(`New offers added:      ${newOffers.length}`);
+  console.log(`Companies scanned:        ${targets.length}`);
+  console.log(`Total jobs found:         ${totalFound}`);
+  console.log(`Filtered by title:        ${totalTitleFiltered} removed`);
+  console.log(`Filtered by location:     ${totalLocationFiltered} rejected`);
+  console.log(`Duplicates:               ${totalDupes} skipped`);
+  console.log(`New offers added:         ${newOffers.length}`);
 
   if (errors.length > 0) {
     console.log(`\nErrors (${errors.length}):`);
     for (const e of errors) {
-      console.log(`  ✗ ${e.company}: ${e.error}`);
+      console.log(`  x ${e.company}: ${e.error}`);
     }
   }
 
@@ -350,12 +331,11 @@ async function main() {
     if (dryRun) {
       console.log('\n(dry run — run without --dry-run to save results)');
     } else {
-      console.log(`\nResults saved to ${PIPELINE_PATH} and ${SCAN_HISTORY_PATH}`);
+      console.log(`\nResults written to ${DB_PATH} (pipeline + scan_history tables)`);
     }
   }
 
-  console.log(`\n→ Run /career-ops pipeline to evaluate new offers.`);
-  console.log('→ Share results and get help: https://discord.gg/8pRpHETxa4');
+  console.log(`\n-> Run /career-ops pipeline to evaluate new offers.`);
 }
 
 main().catch(err => {

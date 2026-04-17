@@ -2,9 +2,15 @@
 
 When the candidate pastes an offer (text or URL), ALWAYS deliver all 7 blocks (A-F evaluation + G legitimacy):
 
-## Step 0 -- Archetype Detection
+## Step 0 -- Context Loading
 
-Classify the offer into one of the 6 archetypes (see `_shared.md`). If it is a hybrid, indicate the 2 closest matches. This determines:
+**If `career-ops-brain.md` exists in the project root**, read it INSTEAD of loading cv.md + _shared.md + _profile.md + profile.yml separately. The brain contains all necessary context (candidate profile, scoring rules, archetypes, evaluation format) in condensed form (~3.3K tokens vs ~12K tokens from separate files). This is the preferred path for batch and pipeline evaluations.
+
+**If brain.md does not exist**, fall back to reading the individual files as listed in _shared.md "Sources of Truth."
+
+## Step 0b -- Archetype Detection
+
+Classify the offer into one of the 6 archetypes (see `_shared.md` or brain.md Section 3). If it is a hybrid, indicate the 2 closest matches. This determines:
 - Which proof points to prioritize in Block B
 - How to rewrite the summary in Block E
 - Which STAR stories to prepare in Block F
@@ -46,7 +52,14 @@ Read `cv.md`. Create a table mapping each JD requirement to exact lines in the C
 
 ## Block D -- Comp and Demand
 
-Use WebSearch for:
+**Company comp cache (check BEFORE WebSearch):**
+1. Read `wiki/career-ops/career-ops-company-intelligence.md` (if exists)
+2. If the company has a comp range entry updated within the last 30 days, use it and cite "career-ops company intelligence, verified {date}"
+3. If the JD posts a salary range, use that as primary source
+4. **Only use WebSearch** if: (a) company is not in the wiki, (b) wiki data is >30 days old, or (c) you need to verify/update a stale entry
+5. When WebSearch IS used, update the wiki comp range for future evaluations
+
+WebSearch targets (when needed):
 - Current salaries for the role (Glassdoor, Levels.fyi, Blind)
 - Company compensation reputation
 - Role demand trends
@@ -71,7 +84,13 @@ Top 5 CV changes + Top 5 LinkedIn changes to maximize match.
 
 The **Reflection** column captures what was learned or what would be done differently. This signals seniority -- junior candidates describe what happened, senior candidates extract lessons.
 
-**Story Bank:** If `interview-prep/story-bank.md` exists, check if any of these stories are already there. If not, append new ones. Over time this builds a reusable bank of 5-10 master stories that can be adapted to any interview question.
+**Story Bank:** Write STAR+R stories to `interview-prep/story-bank.md` under `## {YYYY-MM-DD} -- {company}` with subheadings `## S:` / `## T:` / `## A:` / `## R:` / `## Reflection:`. Then run:
+
+```bash
+node scripts/db-write.mjs insert-story --file interview-prep/story-bank.md
+```
+
+The ingester reads the file and upserts each story into the `star_stories` table. Over time this builds a reusable bank of 5-10 master stories that can be adapted to any interview question.
 
 **Selected and framed according to archetype:**
 - FDE -> emphasize delivery speed and client-facing work
@@ -152,13 +171,19 @@ After completing blocks A-F, extract JD features into the `JDFeatures` schema an
 
 **ALWAYS** after generating blocks A-G:
 
-### 1. Save report .md
+### 1. Save report .md and register it
 
-Save the full evaluation to `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
+Save the full evaluation to `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`, THEN immediately register it in DuckDB:
+
+```bash
+node scripts/db-write.mjs insert-report --file reports/{###}-{company-slug}-{YYYY-MM-DD}.md
+```
 
 - `{###}` = next sequential number (3 digits, zero-padded)
 - `{company-slug}` = company name in lowercase, no spaces (use hyphens)
 - `{YYYY-MM-DD}` = current date
+
+The ingester parses the report header (URL, Score, Legitimacy, Archetype, TL;DR, Remote, Comp, Batch ID), inserts the `reports` row with the full markdown in `body`, UPSERTs the corresponding `applications` row, and refreshes `data/dashboard.json`. **Do not manually edit `data/applications.md`** -- it is regenerated from DuckDB.
 
 **Report format:**
 
@@ -203,20 +228,10 @@ Save the full evaluation to `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 (list of 15-20 keywords from the JD for ATS optimization)
 ```
 
-### 2. Record in tracker
+### 2. Tracker row (auto-created)
 
-**ALWAYS** record in `data/applications.md`:
-- Next sequential number
-- Current date
-- Company
-- Role
-- Score: match average (1-5)
-- Status: `Evaluated`
-- PDF: (yes or no)
-- Report: relative link to the report .md (e.g., `[001](reports/001-company-2026-01-01.md)`)
+The tracker row in `applications` is created by the ingester in step 1 from the report header fields. **Do not write to `data/applications.md`** -- it is a regenerated markdown view of `data/career-ops.duckdb`. The view refreshes automatically on next render; force a refresh any time with:
 
-**Tracker format:**
-
-```markdown
-| # | Date | Company | Role | Score | Status | PDF | Report |
+```bash
+node scripts/db-write.mjs render-markdown applications
 ```

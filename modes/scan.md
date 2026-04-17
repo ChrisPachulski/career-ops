@@ -59,7 +59,7 @@ The levels are additive — all are executed, and results are merged and dedupli
    a. `browser_navigate` to the `careers_url`
    b. `browser_snapshot` to read all job listings
    c. If the page has filters/departments, navigate the relevant sections
-   d. For each job listing extract: `{title, url, company}`
+   d. For each job listing extract: `{title, url, company, location}`
    e. If the page paginates results, navigate additional pages
    f. Accumulate in candidate list
    g. If `careers_url` fails (404, redirect), try `scan_query` as fallback and flag for URL update
@@ -67,7 +67,7 @@ The levels are additive — all are executed, and results are merged and dedupli
 5. **Level 2 — Greenhouse APIs** (parallel):
    For each company in `tracked_companies` with `api:` defined and `enabled: true`:
    a. WebFetch the API URL — JSON with job list
-   b. For each job extract: `{title, url, company}`
+   b. For each job extract: `{title, url, company, location}` (location is in job.location.name)
    c. Accumulate in candidate list (dedup with Level 1)
 
 6. **Level 3 — WebSearch queries** (parallel if possible):
@@ -83,6 +83,15 @@ The levels are additive — all are executed, and results are merged and dedupli
    - At least 1 keyword from `positive` must appear in the title (case-insensitive)
    - 0 keywords from `negative` must appear
    - `seniority_boost` keywords give priority but are not required
+
+6.5. **Filter by location** using `location_filter` from `portals.yml` (if defined):
+   - Check the extracted `location` string against `accept_keywords` first (case-insensitive)
+   - If ANY accept keyword matches, the offer **passes** regardless of reject keywords
+   - If NO accept keyword matches, check against `reject_keywords`
+   - If ANY reject keyword matches, **reject** the offer
+   - If location is empty/unknown (common for WebSearch results), the offer **passes** (evaluated later)
+   - Rejected offers are recorded in `scan-history.tsv` with status `skipped_location`
+   - This filter catches geographic impossibilities (India, EU, Canada onsite) before they consume evaluation time
 
 7. **Deduplicate** against 3 sources:
    - `scan-history.tsv` — exact URL already seen
@@ -137,11 +146,12 @@ If a non-publicly-accessible URL is found:
 `data/scan-history.tsv` tracks ALL URLs seen:
 
 ```
-url	first_seen	portal	title	company	status
-https://...	2026-02-10	Ashby — AI PM	PM AI	Acme	added
-https://...	2026-02-10	Greenhouse — SA	Junior Dev	BigCo	skipped_title
-https://...	2026-02-10	Ashby — AI PM	SA AI	OldCo	skipped_dup
-https://...	2026-02-10	WebSearch — AI PM	PM AI	ClosedCo	skipped_expired
+url	first_seen	portal	title	company	location	status
+https://...	2026-02-10	Ashby — AI PM	PM AI	Acme	Remote	added
+https://...	2026-02-10	Greenhouse — SA	Junior Dev	BigCo	Remote	skipped_title
+https://...	2026-02-10	Ashby — AI PM	SA AI	OldCo	NYC	skipped_dup
+https://...	2026-02-10	WebSearch — AI PM	PM AI	ClosedCo		skipped_expired
+https://...	2026-02-10	Greenhouse — DE	Data Eng	IndCo	Bangalore, India	skipped_location
 ```
 
 ## Output Summary
@@ -152,6 +162,7 @@ Portal Scan — {YYYY-MM-DD}
 Queries executed: N
 Offers found: N total
 Filtered by title: N relevant
+Filtered by location: N rejected (geographic impossibility)
 Duplicates: N (already evaluated or in pipeline)
 Expired discarded: N (dead links, Level 3)
 New added to pipeline.md: N

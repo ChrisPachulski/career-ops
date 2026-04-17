@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+import logging
 import math
 
-from scoring.models import Blocker, DimensionScore, JDFeatures, OrgSignals, Requirement, ScoreResult
+from scoring.diagnostics import build_trace
+from scoring.models import (
+    Blocker,
+    DimensionScore,
+    JDFeatures,
+    OrgSignals,
+    Requirement,
+    ScoreConfig,
+    ScoreResult,
+    Warning,
+)
+from scoring.normalize import normalize_features
+from scoring.validate import validate_features, validate_scores
+
+logger = logging.getLogger("scoring.engine")
+
+
+###############################################################################
+# Dimension scorers
+###############################################################################
 
 
 def _effective_salary(
@@ -27,18 +47,20 @@ def score_comp_alignment(
     comp_target: float,
     *,
     salary_midpoint: float | None = None,
+    config: ScoreConfig | None = None,
 ) -> float:
+    cfg = config or ScoreConfig()
     effective = _effective_salary(salary_low, salary_high, salary_midpoint)
     if effective is None:
-        return 3.0
+        return cfg.comp_thresholds.unknown_default
 
     ratio = effective / comp_target
 
     if ratio >= 1.0:
         return 5.0
-    if ratio >= 0.86:
+    if ratio >= cfg.comp_thresholds.band_4_min:
         return 4.0
-    if ratio >= 0.71:
+    if ratio >= cfg.comp_thresholds.band_3_min:
         return 3.0
     return 2.0
 
@@ -127,7 +149,7 @@ def score_blockers(blockers: list[Blocker]) -> float:
 # Global scoring
 ###############################################################################
 
-_WEIGHTS = {
+_DEFAULT_WEIGHTS = {
     "CV Match": 0.25,
     "Archetype Fit": 0.20,
     "Comp Alignment": 0.20,
@@ -160,7 +182,42 @@ def _format_score_table(dimensions: list[DimensionScore], global_score: float) -
     return "\n".join(lines)
 
 
-def compute_global(features: JDFeatures) -> ScoreResult:
+def _apply_blocker_gate(
+    raw_global: float,
+    blockers: list[Blocker],
+    config: ScoreConfig,
+) -> tuple[float, bool, str | None]:
+    """Graduated blocker gate (replaces binary 2.5 cap).
+
+    Returns (adjusted_global, gate_active, gate_reason).
+    """
+    if not blockers:
+        return raw_global, False, None
+
+    min_severity = min(b.severity for b in blockers)
+    reason = "; ".join(b.description for b in blockers)
+    gate = config.blocker_gate
+
+    if min_severity <= gate.hard_max_severity:
+        return min(raw_global, gate.hard_cap), True, reason
+    if min_severity <= gate.medium_max_severity:
+        return min(raw_global, gate.medium_cap), True, reason
+    return raw_global - gate.soft_penalty, True, reason
+
+
+def compute_global(
+    features: JDFeatures,
+    *,
+    config: ScoreConfig | None = None,
+) -> ScoreResult:
+    """Core scoring computation (Layer 4).
+
+    Use ``evaluate()`` for the full pipeline with validation, normalization,
+    and optional diagnostics.
+    """
+    cfg = config or ScoreConfig()
+    weights = cfg.weights if cfg.weights != ScoreConfig().weights else _DEFAULT_WEIGHTS
+
     dim_scores = {
         "CV Match": score_cv_match(features.requirements),
         "Archetype Fit": score_archetype_fit(
@@ -173,6 +230,7 @@ def compute_global(features: JDFeatures) -> ScoreResult:
             features.salary_high,
             features.comp_target,
             salary_midpoint=features.salary_midpoint,
+            config=cfg,
         ),
         "Level Fit": score_level_fit(
             features.jd_seniority,
@@ -182,11 +240,13 @@ def compute_global(features: JDFeatures) -> ScoreResult:
         "Blockers": score_blockers(features.blockers),
     }
 
+    logger.info("[SCORE] Dimension scores: %s", dim_scores)
+
     dimensions = []
     raw_global = 0.0
 
     for name, score in dim_scores.items():
-        weight = _WEIGHTS[name]
+        weight = weights[name]
         weighted = round(score * weight, 4)
         raw_global += weighted
         dimensions.append(DimensionScore(
@@ -197,12 +257,9 @@ def compute_global(features: JDFeatures) -> ScoreResult:
             reasoning="",
         ))
 
-    blocker_gate_active = len(features.blockers) > 0
-    blocker_gate_reason = None
-
-    if blocker_gate_active:
-        blocker_gate_reason = "; ".join(b.description for b in features.blockers)
-        raw_global = min(raw_global, 2.5)
+    raw_global, blocker_gate_active, blocker_gate_reason = _apply_blocker_gate(
+        raw_global, features.blockers, cfg,
+    )
 
     global_score = _truncate_one_decimal(raw_global)
     global_score = max(1.0, min(5.0, global_score))
@@ -215,6 +272,8 @@ def compute_global(features: JDFeatures) -> ScoreResult:
 
     score_table = _format_score_table(dimensions, global_score)
 
+    logger.info("[SCORE] Global: %.1f (%s)", global_score, interpretation)
+
     return ScoreResult(
         dimensions=dimensions,
         global_score=global_score,
@@ -223,3 +282,54 @@ def compute_global(features: JDFeatures) -> ScoreResult:
         interpretation=interpretation,
         score_table=score_table,
     )
+
+
+###############################################################################
+# Full pipeline orchestrator
+###############################################################################
+
+
+def evaluate(
+    features: JDFeatures,
+    *,
+    config: ScoreConfig | None = None,
+    diagnostics: bool = False,
+) -> ScoreResult:
+    """Full five-layer scoring pipeline.
+
+    Layer 2: normalize features (calibration corrections)
+    Layer 3: validate features (pre-computation coherence checks)
+    Layer 4: compute dimension scores and global score
+    Layer 3b: validate scores (post-computation consistency checks)
+    Layer 4b: optional diagnostic trace
+
+    Warnings from all layers are collected into ScoreResult.warnings.
+    """
+    cfg = config or ScoreConfig()
+    all_warnings: list[Warning] = []
+
+    # Layer 2: Normalization
+    normalized, norm_warnings = normalize_features(features)
+    all_warnings.extend(norm_warnings)
+
+    # Layer 3: Pre-computation validation
+    pre_warnings = validate_features(normalized)
+    all_warnings.extend(pre_warnings)
+
+    # Layer 4: Computation
+    result = compute_global(normalized, config=cfg)
+
+    # Layer 3b: Post-computation validation
+    dim_scores = {d.name: d.score for d in result.dimensions}
+    post_warnings = validate_scores(dim_scores, normalized)
+    all_warnings.extend(post_warnings)
+
+    # Layer 4b: Diagnostic trace
+    trace = None
+    if diagnostics:
+        trace = build_trace(normalized, dim_scores, cfg)
+
+    return result.model_copy(update={
+        "warnings": all_warnings,
+        "diagnostic_trace": trace,
+    })

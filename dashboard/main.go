@@ -124,10 +124,13 @@ func main() {
 
 	careerOpsPath := *pathFlag
 
-	// Load applications
+	// Load applications from the DuckDB snapshot
 	apps := data.ParseApplications(careerOpsPath)
 	if apps == nil {
-		fmt.Fprintf(os.Stderr, "Error: could not find applications.md in %s or %s/data/\n", careerOpsPath, careerOpsPath)
+		fmt.Fprintf(os.Stderr,
+			"Error: could not read %s/data/dashboard.json.\n"+
+				"Run 'node scripts/db-write.mjs refresh-dashboard-json' from %s to rebuild the snapshot.\n",
+			careerOpsPath, careerOpsPath)
 		os.Exit(1)
 	}
 

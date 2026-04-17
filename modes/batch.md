@@ -42,8 +42,14 @@ batch/
    a. Chrome: click on the offer — read JD text from DOM
    b. Save JD to `/tmp/batch-jd-{id}.txt`
    c. Calculate next sequential REPORT_NUM
-   d. Execute via Bash:
+   d. Execute via Bash (prefer brain.md if it exists for 72% token reduction):
       ```bash
+      # If career-ops-brain.md exists (recommended -- 3.3K tokens vs 19K):
+      claude -p --dangerously-skip-permissions \
+        --append-system-prompt-file career-ops-brain.md \
+        "Process this offer. URL: {url}. JD: /tmp/batch-jd-{id}.txt. Report: {num}. ID: {id}"
+
+      # Fallback if brain.md does not exist:
       claude -p --dangerously-skip-permissions \
         --append-system-prompt-file batch/batch-prompt.md \
         "Process this offer. URL: {url}. JD: /tmp/batch-jd-{id}.txt. Report: {num}. ID: {id}"
