@@ -82,17 +82,20 @@ git clone https://github.com/santifer/career-ops.git
 cd career-ops && npm install
 npx playwright install chromium   # Required for PDF generation
 
-# 2. Check setup
+# 2. Initialize the database
+npm run init                       # Creates data/career-ops.duckdb with schema + FTS
+
+# 3. Check setup
 npm run doctor                     # Validates all prerequisites
 
-# 3. Configure
+# 4. Configure
 cp config/profile.example.yml config/profile.yml  # Edit with your details
 cp templates/portals.example.yml portals.yml       # Customize companies
 
-# 4. Add your CV
+# 5. Add your CV
 # Create cv.md in the project root with your CV in markdown
 
-# 5. Personalize with Claude
+# 6. Personalize with Claude
 claude   # Open Claude Code in this directory
 
 # Then ask Claude to adapt the system to you:
@@ -101,13 +104,13 @@ claude   # Open Claude Code in this directory
 # "Add these 5 companies to portals.yml"
 # "Update my profile with this CV I'm pasting"
 
-# 6. Start using
+# 7. Start using
 # Paste a job URL or run /career-ops
 ```
 
 > **The system is designed to be customized by Claude itself.** Modes, archetypes, scoring weights, negotiation scripts -- just ask Claude to change them. It reads the same files it uses, so it knows exactly what to edit.
 
-See [docs/SETUP.md](docs/SETUP.md) for the full setup guide.
+See [SETUP.md](SETUP.md) for the full setup guide, including DuckDB + dashboard details.
 
 ## Usage
 

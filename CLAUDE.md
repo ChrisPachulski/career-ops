@@ -49,19 +49,23 @@ AI-powered job search automation built on Claude Code: pipeline tracking, offer 
 
 | File | Function |
 |------|----------|
-| `data/applications.md` | Application tracker |
-| `data/pipeline.md` | Inbox of pending URLs |
-| `data/scan-history.tsv` | Scanner dedup history |
+| `data/career-ops.duckdb` | **Source of truth.** Pipeline, applications, reports (full markdown bodies + FTS), star stories, interview prep, PDF metadata. Gitignored. |
+| `data/dashboard.json` | Regenerated snapshot read by the Go dashboard. Gitignored. Refresh via `npm run refresh`. |
+| `data/applications.md` | **Regenerated view** of the applications table. Do NOT edit by hand -- rerun `npm run render` to rebuild from DuckDB. |
+| `data/.career-ops.lock` | Lockfile for single-writer DB access. Stale locks self-recover after 60s. |
 | `portals.yml` | Query and company config |
 | `templates/cv-template.html` | HTML template for CVs |
-| `generate-pdf.mjs` | Playwright: HTML to PDF |
-| `article-digest.md` | Compact proof points from portfolio (optional) |
-| `interview-prep/story-bank.md` | Accumulated STAR+R stories across evaluations |
-| `interview-prep/{company}-{role}.md` | Company-specific interview intel reports |
-| `analyze-patterns.mjs` | Pattern analysis script (JSON output) |
-| `followup-cadence.mjs` | Follow-up cadence calculator (JSON output) |
-| `data/follow-ups.md` | Follow-up history tracker |
-| `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy). Header includes `**Legitimacy:** {tier}`. |
+| `scripts/init-db.mjs` | Creates the DuckDB schema (idempotent). Run once after clone. |
+| `scripts/db-write.mjs` | Single ingester CLI (insert-report, insert-story, insert-pdf, drain-queue, update-status, render-markdown, refresh-dashboard-json, query). |
+| `scripts/lockfile.mjs` | Acquire/release the `.career-ops.lock` helper. |
+| `scan.mjs` | Portal scanner; writes directly to DuckDB. |
+| `reconcile-tracker.mjs` | SQL consistency job (replaces old merge-tracker). |
+| `generate-pdf.mjs` | Playwright HTML -> PDF. With `--application-id=N`, emits the follow-up `db-write.mjs insert-pdf` command. |
+| `analyze-patterns.mjs` / `followup-cadence.mjs` | Aggregation queries (JSON output). |
+| `interview-prep/story-bank.md` | STAR+R stories source file (ingested into `star_stories` table). |
+| `interview-prep/{company}-{role}.md` | Per-role interview intel (ingested into `interview_prep` table). |
+| `article-digest.md` | Compact proof points from portfolio (optional). |
+| `reports/` | Evaluation report markdown (`{###}-{company-slug}-{YYYY-MM-DD}.md`). Bodies also live in `reports.body` column. Gitignored. |
 
 ### OpenCode Commands
 
@@ -91,10 +95,13 @@ When using [OpenCode](https://opencode.ai), the following slash commands are ava
 
 **Before doing ANYTHING else, check if the system is set up.** Run these checks silently every time a session starts:
 
-1. Does `cv.md` exist?
-2. Does `config/profile.yml` exist (not just profile.example.yml)?
-3. Does `modes/_profile.md` exist (not just _profile.template.md)?
-4. Does `portals.yml` exist (not just templates/portals.example.yml)?
+1. Does `data/career-ops.duckdb` exist?
+2. Does `cv.md` exist?
+3. Does `config/profile.yml` exist (not just profile.example.yml)?
+4. Does `modes/_profile.md` exist (not just _profile.template.md)?
+5. Does `portals.yml` exist (not just templates/portals.example.yml)?
+
+If `data/career-ops.duckdb` is missing, run `node scripts/init-db.mjs` (or `npm run init`). It creates the schema, sequences, indexes, and the FTS extension. Idempotent -- safe to rerun.
 
 If `modes/_profile.md` is missing, copy from `modes/_profile.template.md` silently. This is the user's customization file — it will never be overwritten by updates.
 
@@ -129,13 +136,17 @@ If `portals.yml` is missing:
 
 Copy `templates/portals.example.yml` → `portals.yml`. If they gave target roles in Step 2, update `title_filter.positive` to match.
 
-#### Step 4: Tracker
-If `data/applications.md` doesn't exist, create it:
-```markdown
-# Applications Tracker
+#### Step 4: Database
+The tracker, pipeline, and report bodies all live in `data/career-ops.duckdb`. If the DB is missing, run:
 
-| # | Date | Company | Role | Score | Status | PDF | Report | Notes |
-|---|------|---------|------|-------|--------|-----|--------|-------|
+```bash
+npm run init
+```
+
+This creates the schema. The markdown view `data/applications.md` is regenerated on demand from the DB -- never edit it by hand. To rebuild it at any time:
+
+```bash
+npm run render
 ```
 
 #### Step 5: Get to know the user (important for quality)
@@ -261,47 +272,32 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 
 ## Stack and Conventions
 
-- Node.js (mjs modules), Playwright (PDF + scraping), YAML (config), HTML/CSS (template), Markdown (data), Canva MCP (optional visual CV)
+- Node.js (mjs modules), DuckDB (state), Playwright (PDF + scraping), YAML (config), HTML/CSS (template), Go (dashboard TUI)
+- Single source of truth: `data/career-ops.duckdb`. Markdown files in `data/` are regenerated views.
 - Scripts in `.mjs`, configuration in YAML
-- Output in `output/` (gitignored), Reports in `reports/`
-- JDs in `jds/` (referenced as `local:jds/{file}` in pipeline.md)
+- Output in `output/` (gitignored), Reports in `reports/` (gitignored; bodies also live in `reports.body`)
+- JDs in `jds/`
 - Batch in `batch/` (gitignored except scripts and prompt)
 - Report numbering: sequential 3-digit zero-padded, max existing + 1
-- **RULE: After each batch of evaluations, run `node merge-tracker.mjs`** to merge tracker additions and avoid duplications.
-- **RULE: NEVER create new entries in applications.md if company+role already exists.** Update the existing entry.
 
-### TSV Format for Tracker Additions
+### Write Paths
 
-Write one TSV file per evaluation to `batch/tracker-additions/{num}-{company-slug}.tsv`. Single line, 9 tab-separated columns:
-
-```
-{num}\t{date}\t{company}\t{role}\t{status}\t{score}/5\t{pdf_emoji}\t[{num}](reports/{num}-{slug}-{date}.md)\t{note}
-```
-
-**Column order (IMPORTANT -- status BEFORE score):**
-1. `num` -- sequential number (integer)
-2. `date` -- YYYY-MM-DD
-3. `company` -- short company name
-4. `role` -- job title
-5. `status` -- canonical status (e.g., `Evaluated`)
-6. `score` -- format `X.X/5` (e.g., `4.2/5`)
-7. `pdf` -- `✅` or `❌`
-8. `report` -- markdown link `[num](reports/...)`
-9. `notes` -- one-line summary
-
-**Note:** In applications.md, score comes BEFORE status. The merge script handles this column swap automatically.
+- **Single evaluation:** `node scripts/db-write.mjs insert-report --file reports/{###}-{slug}-{date}.md` -- parses header, upserts applications, inserts into reports, refreshes dashboard.json, rebuilds FTS.
+- **Batch:** Each worker writes `reports/{###}-...md` + `batch/ingest-queue/{id}.json`. `batch/batch-runner.sh` calls `db-write.mjs drain-queue --queue-dir batch/ingest-queue` once after all workers finish (two-phase commit; DuckDB is single-writer).
+- **PDF:** `node generate-pdf.mjs <input.html> <output.pdf> --application-id=N` writes the PDF and prints the follow-up `db-write.mjs insert-pdf` command on stdout. The caller runs it as a separate step -- on Windows, invoking DuckDB from inside a Playwright-hosting Node process crashes the child. PDFs are stored on disk; only metadata (filename, byte_size, sha256) goes into the `pdfs` table.
+- **Status updates:** `node scripts/db-write.mjs update-status --id N --status <canonical>`. Also how the Go dashboard updates status.
 
 ### Pipeline Integrity
 
-1. **NEVER edit applications.md to ADD new entries** -- Write TSV in `batch/tracker-additions/` and `merge-tracker.mjs` handles the merge.
-2. **YES you can edit applications.md to UPDATE status/notes of existing entries.**
-3. All reports MUST include `**URL:**` in the header (between Score and PDF). Include `**Legitimacy:** {tier}` (see Block G in `modes/evaluate.md`).
-4. All statuses MUST be canonical (see `templates/states.yml`).
-5. Health check: `node verify-pipeline.mjs`
-6. Normalize statuses: `node normalize-statuses.mjs`
-7. Dedup: `node dedup-tracker.mjs`
+1. **Never edit `data/applications.md` directly.** It is a regenerated view -- rebuild with `npm run render`.
+2. All reports MUST include `**URL:**` in the header (between Score and PDF). Include `**Legitimacy:** {tier}` (see Block G in `modes/evaluate.md`).
+3. All statuses MUST be canonical (see `templates/states.yml`).
+4. Health check: `npm run verify` (`node verify-pipeline.mjs`).
+5. SQL consistency reconcile: `npm run reconcile` (`node reconcile-tracker.mjs`).
+6. Dedup: `npm run dedup` (`node dedup-tracker.mjs`).
+7. Ad-hoc query: `node scripts/db-write.mjs query --sql "SELECT ..."`.
 
-### Canonical States (applications.md)
+### Canonical States (applications.status ENUM)
 
 **Source of truth:** `templates/states.yml`
 
