@@ -54,3 +54,17 @@ __pycache__/
 .claude/memory/
 career-dashboard
 package-lock.json
+
+# Burn-it-all session artifacts -- contain comp data, named contacts, DM drafts. Local only.
+article-digest.md
+cv-causal-ds.md
+cv-applied-ai.md
+cv-analytics-eng.md
+RANKED-TARGETS-AND-ACTIONS.md
+data/90-day-plan.md
+data/comp-benchmark.md
+data/opportunity-scan.md
+data/pipeline-rescue.md
+# All interview-prep markdown EXCEPT the upstream story-bank template
+interview-prep/*.md
+!interview-prep/story-bank.md
