@@ -52,6 +52,7 @@ __pycache__/
 # Claude Code local
 .claude/settings.local.json
 .claude/memory/
+.claude/*.local.md
 career-dashboard
 package-lock.json
 
