@@ -11,15 +11,21 @@ These files contain your personal data, customizations, and work product. Update
 | `cv.md` | Your CV in markdown |
 | `config/profile.yml` | Your identity, targets, comp range |
 | `modes/_profile.md` | Your archetypes, narrative, negotiation scripts |
+| `modes/_custom.md` | Your house rules, custom workflows & output preferences (procedural — survives updates) |
+| `voice-dna.md` | Your writing voice guardrail — banned words, anti-AI-slop rules, tone (optional) |
 | `article-digest.md` | Your proof points from portfolio |
 | `interview-prep/story-bank.md` | Your accumulated STAR+R stories |
+| `interview-prep/{company}-{role}.md` | Company-specific interview prep reports (written by `/career-ops interview-prep`) |
 | `portals.yml` | Your customized company list |
-
-**Exception:** `interview-prep/story-bank.md` is auto-accumulated during evaluations (new STAR+R stories are appended after each evaluation). This is the one user-layer file that the system writes to automatically. The user may edit or reorganize it at any time; the system only appends, never overwrites.
-| `data/applications.md` | Your application tracker |
+| `config/plugins.yml` | Your plugin activation toggles (opt-in; seeded from `config/plugins.example.yml`) |
+| `plugins.local/` | Your own / private plugins (never auto-updated) |
+| `plugins.lock` | Integrity pins + recorded consent for your enabled plugins (generated; never auto-updated) |
+| `data/applications.md` | Your application tracker (source of truth) |
+| `data/applications.db` | Derived query index over `applications.md` (SQLite, rebuilt by `node tracker.mjs sync` — safe to delete) |
 | `data/pipeline.md` | Your URL inbox |
 | `data/scan-history.tsv` | Your scan history |
 | `data/follow-ups.md` | Your follow-up history |
+| `writing-samples/*` | Your personal writing samples for style calibration (except `writing-samples/README.md`, which is system-owned documentation delivered by updates) |
 | `reports/*` | Your evaluation reports |
 | `output/*` | Your generated PDFs |
 | `jds/*` | Your saved job descriptions |
@@ -31,15 +37,17 @@ These files contain system logic, scripts, templates, and instructions that impr
 | File | Purpose |
 |------|---------|
 | `modes/_shared.md` | Scoring system, global rules, tools |
-| `modes/evaluate.md` | Evaluation mode instructions |
+| `modes/_custom.template.md` | Template seed for the user's `modes/_custom.md` |
+| `modes/oferta.md` | Evaluation mode instructions |
 | `modes/pdf.md` | PDF generation instructions |
 | `modes/scan.md` | Portal scanner instructions |
 | `modes/batch.md` | Batch processing instructions |
 | `modes/apply.md` | Application assistant instructions |
 | `modes/auto-pipeline.md` | Auto-pipeline instructions |
-| `modes/contact.md` | LinkedIn outreach instructions |
+| `modes/contacto.md` | LinkedIn outreach instructions |
 | `modes/deep.md` | Research prompt instructions |
-| `modes/compare.md` | Comparison instructions |
+| `modes/regional/*` | Regional market calibration modes |
+| `modes/ofertas.md` | Comparison instructions |
 | `modes/pipeline.md` | Pipeline processing instructions |
 | `modes/project.md` | Project evaluation instructions |
 | `modes/tracker.md` | Tracker instructions |
@@ -47,18 +55,36 @@ These files contain system logic, scripts, templates, and instructions that impr
 | `modes/patterns.md` | Pattern analysis instructions |
 | `modes/followup.md` | Follow-up cadence instructions |
 | `modes/de/*` | German language modes |
-| `CLAUDE.md` | Agent instructions |
-| `AGENTS.md` | Codex instructions |
+| `modes/fr/*` | French language modes |
+| `modes/ja/*` | Japanese language modes |
+| `modes/pl/*` | Polish language modes |
+| `modes/pt/*` | Portuguese language modes |
+| `modes/ru/*` | Russian language modes |
+| `modes/heuristics/*` | Shared candidate-facing application heuristics |
+| `CLAUDE.md` | Agent instructions (Claude Code) |
+| `OPENCODE.md` | Agent instructions (OpenCode) |
+| `GEMINI.md` | Legacy no-op context guard (prevents Antigravity duplicate imports) |
+| `AGENTS.md` | Canonical agent instructions (imported by CLI-specific wrappers) |
 | `*.mjs` | Utility scripts |
+| `plugins/` | Bundled plugins + the plugin engine (opt-in external integrations) |
+| `plugins.mjs` | Plugin CLI (list/run/available/add/new/enable/skill/trust/remove) |
+| `plugins-registry.json` | Curated list of approved community plugins (the trust root) |
+| `plugin-install.mjs` / `plugin-audit.mjs` / `validate-plugin-registry.mjs` | Plugin install/audit/registry-validation utilities |
+| `config/plugins.example.yml` | Plugin activation template (seed for `config/plugins.yml`) |
 | `batch/batch-prompt.md` | Batch worker prompt |
 | `batch/batch-runner.sh` | Batch orchestrator |
 | `dashboard/*` | Go TUI dashboard |
 | `templates/*` | Base templates |
 | `fonts/*` | Self-hosted fonts |
-| `.claude/skills/*` | Skill definitions |
+| `.claude/skills/*` | Skill definitions (Claude Code) |
+| `.opencode/skills/*` | Skill definitions (OpenCode) |
+| `.qwen/skills/*` | Skill definitions (Qwen Code) |
+| `.antigravitycli/skills/*` | Skill definitions (Antigravity CLI) |
+| `.grok/skills/*` | Skill definitions (Grok Build CLI) |
 | `docs/*` | Documentation |
 | `VERSION` | Current version number |
 | `DATA_CONTRACT.md` | This file |
+| `writing-samples/README.md` | System-owned onboarding documentation for the writing-samples directory |
 
 ## The Rule
 

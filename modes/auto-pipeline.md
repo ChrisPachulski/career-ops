@@ -1,8 +1,8 @@
-# Mode: auto-pipeline -- Full Automatic Pipeline
+# Mode: auto-pipeline — Full Automatic Pipeline
 
-When the user pastes a JD (text or URL) without an explicit sub-command, run the ENTIRE pipeline in sequence:
+When the user pastes a JD (text or URL) without an explicit sub-command, execute the ENTIRE pipeline in sequence:
 
-## Step 0 -- Extract JD
+## Step 0 — Extract JD
 
 If the input is a **URL** (not pasted JD text), follow this strategy to extract the content:
 
@@ -10,39 +10,51 @@ If the input is a **URL** (not pasted JD text), follow this strategy to extract 
 
 1. **Playwright (preferred):** Most job portals (Lever, Ashby, Greenhouse, Workday) are SPAs. Use `browser_navigate` + `browser_snapshot` to render and read the JD.
 2. **WebFetch (fallback):** For static pages (ZipRecruiter, WeLoveProduct, company career pages).
-3. **WebSearch (last resort):** Search for the role title + company on secondary portals that index the JD in static HTML.
+3. **WebSearch (last resort):** Search for the role title + company in secondary portals that index the JD in static HTML.
 
 **If no method works:** Ask the candidate to paste the JD manually or share a screenshot.
 
-**If the input is JD text** (not a URL): use it directly, no fetch needed.
+**If the input is JD text** (not a URL): use directly, without needing to fetch.
 
-## Step 1 -- A-G Evaluation
-Run exactly the same as the `evaluate` mode (read `modes/evaluate.md` for all blocks A-F + Block G Posting Legitimacy).
+## Step 0.5 — Liveness gate
 
-## Step 2 -- Save Report .md and Register in DuckDB
-Save the full evaluation to `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (see format in `modes/evaluate.md`).
-Include Block G in the saved report. Add `**Legitimacy:** {tier}` to the report header.
+Before running any evaluation, confirm the posting is still live. The Step 0 Playwright snapshot already holds the evidence — judge it now, before spending tokens on the A-G evaluation, the report, or a PDF. A 404/expired page silently served as a static fallback ("position filled", empty shell) otherwise scores a full evaluation against phantom content.
 
-Immediately after writing the markdown, register it:
+1. From the Step 0 snapshot/fetched content, classify the posting:
+   - **active posting evidence:** title/role + a real job description or an application/apply path
+   - **closed posting evidence:** expired/closed/"no longer accepting applications", missing JD with only nav/footer, hard redirect to a generic careers/search page, or 404/410
+2. If the posting appears closed or the page is a dead/fallback shell, **stop here**: do not run Step 1–Step 4. Tell the candidate the link is dead, and if the entry came from `data/pipeline.md`, mark it `- [x] ~~Company | Role~~ — oferta nieaktywna`.
+3. If only JD text was pasted (no URL), there is no link to verify — skip the gate and proceed.
 
-```bash
-node scripts/db-write.mjs insert-report --file reports/{###}-{company-slug}-{YYYY-MM-DD}.md
-```
+Do not continue to Step 1 until this gate is resolved.
 
-The ingester parses the report header, inserts into `reports`, UPSERTs `applications`, links `latest_report_id`, and refreshes `data/dashboard.json`. **Do not manually edit `data/applications.md`.**
+## Step 1 — A-G Evaluation
 
-## Step 3 -- Generate PDF
-Run the full `pdf` pipeline (read `modes/pdf.md`).
+Execute the same as the `oferta` mode (read `modes/oferta.md` for all A-F blocks + Block G Posting Legitimacy).
 
-## Step 4 -- Draft Application Answers (only if score >= 4.5)
+The evaluation inherits `oferta`'s bounded research budget. Company, compensation, and hiring-signal lookup must not invoke `deep-research`, must not spawn subagents, and must stop at the shared query cap instead of escalating into open-ended research.
 
-If the final score is >= 4.5, generate draft answers for the application form:
+## Step 2 — Save Report .md
+
+Save the full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (see format in `modes/oferta.md`).
+Include Block G in the saved report. Add **URL:** {url} and **Legitimacy:** {tier} to the report header.
+
+## Step 3 — Generate PDF
+
+Read `config/profile.yml`. Check `cv.output_format`:
+
+- If `"latex"`, execute the full pipeline from `modes/latex.md`
+- Otherwise (default), execute the full pipeline from `modes/pdf.md`
+
+## Step 4 — Draft Application Answers (only if score >= 4.5)
+
+If the final score is >= 4.5, generate a draft of responses for the application form:
 
 1. **Extract form questions**: Use Playwright to navigate to the form and take a snapshot. If they cannot be extracted, use the generic questions.
-2. **Generate answers** following the tone guidelines (see below).
-3. **Save in the report** as a `## H) Draft Application Answers` section.
+2. **Generate responses** following the tone (see below).
+3. **Save in the report** as section `## H) Draft Application Answers`.
 
-### Generic questions (use if form questions cannot be extracted)
+### Generic questions (use if they cannot be extracted from the form)
 
 - Why are you interested in this role?
 - Why do you want to work at [Company]?
@@ -52,29 +64,26 @@ If the final score is >= 4.5, generate draft answers for the application form:
 
 ### Tone for Form Answers
 
-**Stance: "I'm choosing you."** The candidate has options and is choosing this company for concrete reasons.
+**Position: "I'm choosing you."** The candidate has options and is choosing this company for specific reasons.
 
 **Tone rules:**
-- **Confident without arrogance**: "I've spent the past year building production AI agent systems -- your role is where I want to apply that experience next"
-- **Selective without conceit**: "I've been intentional about finding a team where I can contribute meaningfully from day one"
+- **Confident without arrogance**: "I've spent the past year building production AI agent systems — your role is where I want to apply that experience next"
+- **Selective without arrogance**: "I've been intentional about finding a team where I can contribute meaningfully from day one"
 - **Specific and concrete**: Always reference something REAL from the JD or the company, and something REAL from the candidate's experience
-- **Direct, no fluff**: 2-4 sentences per answer. No "I'm passionate about..." or "I would love the opportunity to..."
-- **The hook is the proof, not the claim**: Instead of "I'm great at X", say "I built X that does Y"
+- **Direct, without fluff**: 2-4 sentences per response. No "I'm passionate about..." or "I would love the opportunity to..."
+- **The hook is the proof, not the statement**: Instead of "I'm great at X", say "I built X that does Y"
 
 **Framework per question:**
-- **Why this role?** -- "Your [specific thing] maps directly to [specific thing I built]."
-- **Why this company?** -- Mention something concrete about the company. "I've been using [product] for [time/purpose]."
-- **Relevant experience?** -- A quantified proof point. "Built [X] that [metric]. Sold the company in 2025."
-- **Good fit?** -- "I sit at the intersection of [A] and [B], which is exactly where this role lives."
-- **How did you hear?** -- Honest: "Found through [portal/scan], evaluated against my criteria, and it scored highest."
+- **Why this role?** → "Your [specific thing] maps directly to [specific thing I built]."
+- **Why this company?** → Mention something specific about the company. "I've been using [product] for [time/purpose]."
+- **Relevant experience?** → A quantified proof point. "Built [X] that [metric]. Sold the company in 2025."
+- **Good fit?** → "I sit at the intersection of [A] and [B], which is exactly where this role lives."
+- **How did you hear?** → Honest: "Found through [portal/scan], evaluated against my criteria, and it scored highest."
 
 **Language**: Always in the language of the JD (EN default). Apply `/tech-translate`.
 
-## Step 5 -- Tracker (auto-updated)
-The tracker row is already present in DuckDB from Step 2's ingester call. Step 3's PDF generator records `has_pdf = TRUE` and `pdf_id` on the same `applications` row. **Do not edit `data/applications.md`** -- it is a regenerated view. If you want to force-refresh the markdown snapshot, run:
+## Step 5 — Update Tracker
 
-```bash
-node scripts/db-write.mjs render-markdown applications
-```
+Record it in `data/applications.md` with all columns including Report and PDF as ✅.
 
-**If any step fails**, continue with the remaining steps. The ingester is idempotent; re-running `insert-report` on the same file updates rather than duplicates.
+**If any step fails**, continue with the next ones and mark the failed step as pending in the tracker.

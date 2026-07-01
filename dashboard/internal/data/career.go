@@ -1,206 +1,459 @@
 package data
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/santifer/career-ops/dashboard/internal/model"
 )
 
-// dashboardRow is the JSON schema written by
-// scripts/db-write.mjs refresh-dashboard-json. Fields map 1:1 to applications
-// joined with the latest_report row so the dashboard can render without a
-// second trip to the DB.
-type dashboardRow struct {
-	ID                int     `json:"id"`
-	Date              string  `json:"date"`
-	Company           string  `json:"company"`
-	Role              string  `json:"role"`
-	Score             float64 `json:"score"`
-	Status            string  `json:"status"`
-	HasPDF            bool    `json:"has_pdf"`
-	URL               string  `json:"url"`
-	BatchID           string  `json:"batch_id"`
-	Archetype         string  `json:"archetype"`
-	TlDr              string  `json:"tldr"`
-	Remote            string  `json:"remote"`
-	Comp              string  `json:"comp"`
-	Legitimacy        string  `json:"legitimacy"`
-	Notes             string  `json:"notes"`
-	ReportNum         *int    `json:"report_num"`
-	ReportCompanySlug string  `json:"report_company_slug"`
-	ReportDate        string  `json:"report_date"`
+var (
+	reReportLink     = regexp.MustCompile(`\[(\d+)\]\(([^)]+)\)`)
+	reScoreValue     = regexp.MustCompile(`(\d+\.?\d*)/5`)
+	reArchetype      = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype)(?:\s+(?:detectado|detected))?\*\*\s*\|\s*(.+)`)
+	reTlDr           = regexp.MustCompile(`(?i)\*\*TL;DR\*\*\s*\|\s*(.+)`)
+	reTlDrColon      = regexp.MustCompile(`(?i)\*\*TL;DR:\*\*\s*(.+)`)
+	reRemote         = regexp.MustCompile(`(?i)\*\*Remote\*\*\s*\|\s*(.+)`)
+	reComp           = regexp.MustCompile(`(?i)\*\*Comp\*\*\s*\|\s*(.+)`)
+	reArchetypeColon = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype):\*\*\s*(.+)`)
+	reArchetypeYAML  = regexp.MustCompile(`(?m)^archetype:\s*"?([^"\n]+)"?\s*$`)
+	reReportURL      = regexp.MustCompile(`(?m)^\*\*URL:\*\*\s*(https?://\S+)`)
+	reBatchID        = regexp.MustCompile(`(?m)^\*\*Batch ID:\*\*\s*(\d+)`)
+)
+
+// resolveReportPath converts a report link from the tracker into a path
+// relative to careerOpsPath. Links are normally relative to the tracker
+// file's own directory (see merge-tracker.mjs link normalization, #760);
+// legacy trackers may still carry root-relative links, so fall back to the
+// raw link when the tracker-relative resolution does not exist on disk.
+func resolveReportPath(careerOpsPath, trackerPath, link string) string {
+	resolved := filepath.Join(filepath.Dir(trackerPath), link)
+	if _, err := os.Stat(resolved); err != nil {
+		legacy := filepath.Join(careerOpsPath, link)
+		if _, err2 := os.Stat(legacy); err2 == nil {
+			resolved = legacy
+		}
+	}
+	if rel, err := filepath.Rel(careerOpsPath, resolved); err == nil {
+		return rel
+	}
+	return link
 }
 
-// dashboardJSONPath returns the expected location of the DuckDB snapshot.
-func dashboardJSONPath(careerOpsPath string) string {
-	return filepath.Join(careerOpsPath, "data", "dashboard.json")
-}
-
-// duckDBPath returns the expected location of the DuckDB file.
-func duckDBPath(careerOpsPath string) string {
-	return filepath.Join(careerOpsPath, "data", "career-ops.duckdb")
-}
-
-// ParseApplications reads data/dashboard.json (produced by
-// scripts/db-write.mjs refresh-dashboard-json) and returns the tracker view.
-// Returns nil when the snapshot is missing or unreadable so callers can surface
-// a clear onboarding message.
+// ParseApplications reads applications.md and returns parsed applications.
+// It tries both {path}/applications.md and {path}/data/applications.md for compatibility.
 func ParseApplications(careerOpsPath string) []model.CareerApplication {
-	content, err := os.ReadFile(dashboardJSONPath(careerOpsPath))
+	filePath := filepath.Join(careerOpsPath, "applications.md")
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		// Fallback: try data/ subdirectory
+		filePath = filepath.Join(careerOpsPath, "data", "applications.md")
+		content, err = os.ReadFile(filePath)
+		if err != nil {
+			return nil
+		}
+	}
+
+	lines := strings.Split(string(content), "\n")
+	apps := make([]model.CareerApplication, 0)
+	num := 0
+
+	// Map columns by header name rather than fixed position, so a customized or
+	// reordered tracker (e.g. an inserted Location column) does not desync the
+	// reader. Falls back to the legacy fixed layout when no header is present.
+	// This matches the Node tracker tooling, which became header-aware in #954.
+	cols := resolveTrackerColumns(lines)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "# ") || strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "| #") {
+			continue
+		}
+		if !strings.HasPrefix(line, "|") {
+			continue
+		}
+
+		fields := splitTrackerRow(line)
+		if len(fields) < 8 {
+			continue
+		}
+
+		at := func(name string) string {
+			if idx, ok := cols[name]; ok && idx >= 0 && idx < len(fields) {
+				return fields[idx]
+			}
+			return ""
+		}
+
+		num++
+		trackerNumber := num
+		if parsedNumber, err := strconv.Atoi(at("num")); err == nil {
+			trackerNumber = parsedNumber
+		}
+		app := model.CareerApplication{
+			Number:  trackerNumber,
+			Date:    at("date"),
+			Company: at("company"),
+			Role:    at("role"),
+			Status:  at("status"),
+			HasPDF:  strings.Contains(at("pdf"), "\u2705"),
+		}
+
+		// Parse score from the Score column.
+		app.ScoreRaw = at("score")
+		if sm := reScoreValue.FindStringSubmatch(at("score")); sm != nil {
+			app.Score, _ = strconv.ParseFloat(sm[1], 64)
+		}
+
+		// Parse report link. Tracker links are written relative to the
+		// tracker file itself (e.g. ../reports/... when the tracker lives in
+		// data/), so resolve against the tracker's directory and normalize
+		// back to a careerOpsPath-relative path, which is what every
+		// consumer joins against. Legacy root-relative links are kept as a
+		// fallback when the resolved file does not exist.
+		if rm := reReportLink.FindStringSubmatch(at("report")); rm != nil {
+			app.ReportNumber = rm[1]
+			app.ReportPath = resolveReportPath(careerOpsPath, filePath, rm[2])
+		}
+
+		// Notes column, when present.
+		app.Notes = at("notes")
+
+		// Lift location / work mode / pay / last-contact out of the notes free-text
+		deriveNoteFields(&app)
+
+		apps = append(apps, app)
+	}
+
+	// Enrich with job URLs using 5-tier strategy:
+	// 1. **URL:** field in report header (newest reports)
+	// 2. **Batch ID:** in report -> batch-input.tsv URL lookup
+	// 3. report_num -> batch-state completed mapping (legacy)
+	// 4. scan-history.tsv (pipeline scan entries matched by company+role)
+	// 5. company name fallback from batch-input.tsv
+	batchURLs := loadBatchInputURLs(careerOpsPath)
+	reportNumURLs := loadJobURLs(careerOpsPath)
+
+	for i := range apps {
+		if apps[i].ReportPath == "" {
+			continue
+		}
+		fullReport := filepath.Join(careerOpsPath, apps[i].ReportPath)
+		reportContent, err := os.ReadFile(fullReport)
+		if err != nil {
+			continue
+		}
+		header := string(reportContent)
+		// Only scan the header (first 1000 bytes) for speed
+		if len(header) > 1000 {
+			header = header[:1000]
+		}
+
+		// Strategy 1: **URL:** in report
+		if m := reReportURL.FindStringSubmatch(header); m != nil {
+			apps[i].JobURL = m[1]
+			continue
+		}
+
+		// Strategy 2: **Batch ID:** -> batch-input.tsv
+		if m := reBatchID.FindStringSubmatch(header); m != nil {
+			if url, ok := batchURLs[m[1]]; ok {
+				apps[i].JobURL = url
+				continue
+			}
+		}
+
+		// Strategy 3: report_num -> batch-state completed mapping
+		if reportNumURLs != nil {
+			if url, ok := reportNumURLs[apps[i].ReportNumber]; ok {
+				apps[i].JobURL = url
+				continue
+			}
+		}
+	}
+
+	// Strategy 4: scan-history.tsv (pipeline scan entries matched by company+role)
+	enrichFromScanHistory(careerOpsPath, apps)
+
+	// Strategy 5: company name fallback from batch-input.tsv
+	enrichAppURLsByCompany(careerOpsPath, apps)
+
+	return apps
+}
+
+// loadBatchInputURLs reads batch-input.tsv and returns a map of batch ID -> job URL.
+func loadBatchInputURLs(careerOpsPath string) map[string]string {
+	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
+	inputData, err := os.ReadFile(inputPath)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, line := range strings.Split(string(inputData), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 || fields[0] == "id" {
+			continue
+		}
+		id := fields[0]
+		notes := fields[3]
+		// Extract real job URL from notes: "Title @ Company | Match% | https://actual-url"
+		if idx := strings.LastIndex(notes, "| "); idx >= 0 {
+			u := strings.TrimSpace(notes[idx+2:])
+			if strings.HasPrefix(u, "http") {
+				result[id] = u
+				continue
+			}
+		}
+		// Fallback: use JackJill URL
+		if strings.HasPrefix(fields[1], "http") {
+			result[id] = fields[1]
+		}
+	}
+	return result
+}
+
+// batchEntry holds parsed data from batch-input.tsv.
+type batchEntry struct {
+	id      string
+	url     string
+	company string
+	role    string
+}
+
+// loadJobURLs reads batch TSV files and returns a map of report_num -> job URL.
+// Uses two strategies: (1) report_num mapping for completed jobs, (2) company name
+// matching as fallback for failed/missing jobs.
+func loadJobURLs(careerOpsPath string) map[string]string {
+	// Read batch-input.tsv: id \t url \t source \t notes
+	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
+	inputData, err := os.ReadFile(inputPath)
 	if err != nil {
 		return nil
 	}
 
-	var rows []dashboardRow
-	if err := json.Unmarshal(content, &rows); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: dashboard.json unmarshal failed: %v\n", err)
+	// Parse batch-input: extract job URL, company, and role from notes
+	entries := make(map[string]batchEntry) // keyed by id
+	for _, line := range strings.Split(string(inputData), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 || fields[0] == "id" {
+			continue
+		}
+		e := batchEntry{id: fields[0]}
+		notes := fields[3]
+
+		// Extract URL from notes: "Title @ Company | Match% | https://actual-url"
+		if idx := strings.LastIndex(notes, "| "); idx >= 0 {
+			u := strings.TrimSpace(notes[idx+2:])
+			if strings.HasPrefix(u, "http") {
+				e.url = u
+			}
+		}
+		// Fallback: use JackJill URL from field 1
+		if e.url == "" && strings.HasPrefix(fields[1], "http") {
+			e.url = fields[1]
+		}
+
+		// Extract company and role: "Role @ Company | Match% | URL"
+		notesPart := notes
+		if pipeIdx := strings.Index(notesPart, " | "); pipeIdx >= 0 {
+			notesPart = notesPart[:pipeIdx]
+		}
+		if atIdx := strings.LastIndex(notesPart, " @ "); atIdx >= 0 {
+			e.role = strings.TrimSpace(notesPart[:atIdx])
+			e.company = strings.TrimSpace(notesPart[atIdx+3:])
+		}
+
+		if e.url != "" {
+			entries[fields[0]] = e
+		}
+	}
+
+	// Read batch-state.tsv: id \t url \t status \t ... \t report_num \t ...
+	statePath := filepath.Join(careerOpsPath, "batch", "batch-state.tsv")
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
 		return nil
 	}
 
-	apps := make([]model.CareerApplication, 0, len(rows))
-	for _, r := range rows {
-		app := model.CareerApplication{
-			Number:       r.ID,
-			Date:         r.Date,
-			Company:      r.Company,
-			Role:         r.Role,
-			Status:       r.Status,
-			Score:        r.Score,
-			ScoreRaw:     scoreDisplay(r.Score),
-			HasPDF:       r.HasPDF,
-			Notes:        r.Notes,
-			JobURL:       r.URL,
-			Archetype:    r.Archetype,
-			TlDr:         r.TlDr,
-			Remote:       r.Remote,
-			CompEstimate: r.Comp,
+	// Strategy 1: map report_num -> URL only for COMPLETED jobs
+	reportToURL := make(map[string]string)
+	for _, line := range strings.Split(string(stateData), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 6 || fields[0] == "id" {
+			continue
 		}
-		if r.ReportNum != nil {
-			app.ReportNumber = fmt.Sprintf("%03d", *r.ReportNum)
-			// Prefer the exact slug + date stored in the DB; fall back to a
-			// best-effort slug of the company name if the join column is
-			// absent (older snapshot).
-			slug := r.ReportCompanySlug
-			if slug == "" {
-				slug = slugify(r.Company)
-			}
-			date := r.ReportDate
-			if date == "" {
-				date = r.Date
-			}
-			app.ReportPath = filepath.Join(
-				"reports",
-				fmt.Sprintf("%s-%s-%s.md", app.ReportNumber, slug, date),
-			)
+		id := fields[0]
+		status := fields[2]
+		reportNum := fields[5]
+		if status != "completed" || reportNum == "" || reportNum == "-" {
+			continue
 		}
-		apps = append(apps, app)
+		if e, ok := entries[id]; ok {
+			reportToURL[reportNum] = e.url
+			if len(reportNum) < 3 {
+				reportToURL[fmt.Sprintf("%03s", reportNum)] = e.url
+			}
+		}
 	}
-	return apps
+
+	return reportToURL
 }
 
-func scoreDisplay(score float64) string {
-	if score == 0 {
-		return ""
+// enrichFromScanHistory fills JobURL from scan-history.tsv by matching company name.
+func enrichFromScanHistory(careerOpsPath string, apps []model.CareerApplication) {
+	scanPath := filepath.Join(careerOpsPath, "scan-history.tsv")
+	scanData, err := os.ReadFile(scanPath)
+	if err != nil {
+		return
 	}
-	return fmt.Sprintf("%.1f/5", score)
+
+	// Build company -> URL index from scan-history
+	type scanEntry struct {
+		url     string
+		company string
+		title   string
+	}
+	byCompany := make(map[string][]scanEntry)
+	for _, line := range strings.Split(string(scanData), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 5 || fields[0] == "url" {
+			continue
+		}
+		url := fields[0]
+		company := fields[4]
+		title := fields[3]
+		if url == "" || !strings.HasPrefix(url, "http") {
+			continue
+		}
+		key := normalizeCompany(company)
+		byCompany[key] = append(byCompany[key], scanEntry{url: url, company: company, title: title})
+	}
+
+	for i := range apps {
+		if apps[i].JobURL != "" {
+			continue
+		}
+		key := normalizeCompany(apps[i].Company)
+		matches := byCompany[key]
+		if len(matches) == 1 {
+			apps[i].JobURL = matches[0].url
+		} else if len(matches) > 1 {
+			// Multiple entries: pick best role match
+			appRole := strings.ToLower(apps[i].Role)
+			best := matches[0].url
+			bestScore := 0
+			for _, m := range matches {
+				score := 0
+				mTitle := strings.ToLower(m.title)
+				for _, word := range strings.Fields(appRole) {
+					if len(word) > 2 && strings.Contains(mTitle, word) {
+						score++
+					}
+				}
+				if score > bestScore {
+					bestScore = score
+					best = m.url
+				}
+			}
+			apps[i].JobURL = best
+		}
+	}
 }
 
-// slugify reproduces the db-write.mjs report-filename slug so the dashboard can
-// reconstruct the expected report path from (report_num, company, date).
-func slugify(name string) string {
+// normalizeCompany strips common suffixes and lowercases a company name.
+func normalizeCompany(name string) string {
 	s := strings.ToLower(strings.TrimSpace(name))
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == ' ', r == '-', r == '_', r == '.', r == '/':
-			b.WriteRune('-')
+	for _, suffix := range []string{" inc.", " inc", " llc", " ltd", " corp", " corporation", " technologies", " technology", " group", " co."} {
+		s = strings.TrimSuffix(s, suffix)
+	}
+	return strings.TrimSpace(s)
+}
+
+// enrichAppURLsByCompany fills in JobURL for apps that didn't get one via report_num mapping.
+// It matches by company name from batch-input.tsv notes.
+func enrichAppURLsByCompany(careerOpsPath string, apps []model.CareerApplication) {
+	inputPath := filepath.Join(careerOpsPath, "batch", "batch-input.tsv")
+	inputData, err := os.ReadFile(inputPath)
+	if err != nil {
+		return
+	}
+
+	// Build company -> []entry index
+	type entry struct {
+		role string
+		url  string
+	}
+	byCompany := make(map[string][]entry)
+	for _, line := range strings.Split(string(inputData), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 || fields[0] == "id" {
+			continue
+		}
+		notes := fields[3]
+		var url string
+		if idx := strings.LastIndex(notes, "| "); idx >= 0 {
+			u := strings.TrimSpace(notes[idx+2:])
+			if strings.HasPrefix(u, "http") {
+				url = u
+			}
+		}
+		if url == "" && strings.HasPrefix(fields[1], "http") {
+			url = fields[1]
+		}
+		if url == "" {
+			continue
+		}
+		notesPart := notes
+		if pipeIdx := strings.Index(notesPart, " | "); pipeIdx >= 0 {
+			notesPart = notesPart[:pipeIdx]
+		}
+		if atIdx := strings.LastIndex(notesPart, " @ "); atIdx >= 0 {
+			role := strings.TrimSpace(notesPart[:atIdx])
+			company := strings.TrimSpace(notesPart[atIdx+3:])
+			key := normalizeCompany(company)
+			byCompany[key] = append(byCompany[key], entry{role: role, url: url})
 		}
 	}
-	out := strings.Trim(b.String(), "-")
-	for strings.Contains(out, "--") {
-		out = strings.ReplaceAll(out, "--", "-")
-	}
-	return out
-}
 
-// LoadReportSummary returns the cached enrichment fields carried on the
-// CareerApplication struct populated from dashboard.json. The pre-JSON
-// implementation re-parsed the markdown file; that path is gone.
-func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remote, comp string) {
-	apps := ParseApplications(careerOpsPath)
-	for _, a := range apps {
-		if a.ReportPath == reportPath {
-			return a.Archetype, a.TlDr, a.Remote, a.CompEstimate
+	for i := range apps {
+		if apps[i].JobURL != "" {
+			continue
+		}
+		key := normalizeCompany(apps[i].Company)
+		matches := byCompany[key]
+		if len(matches) == 1 {
+			apps[i].JobURL = matches[0].url
+		} else if len(matches) > 1 {
+			// Multiple entries for same company: pick best role match
+			appRole := strings.ToLower(apps[i].Role)
+			best := matches[0].url
+			bestScore := 0
+			for _, m := range matches {
+				score := 0
+				mRole := strings.ToLower(m.role)
+				// Count matching words
+				for _, word := range strings.Fields(appRole) {
+					if len(word) > 2 && strings.Contains(mRole, word) {
+						score++
+					}
+				}
+				if score > bestScore {
+					bestScore = score
+					best = m.url
+				}
+			}
+			apps[i].JobURL = best
 		}
 	}
-	return
 }
 
-// UpdateApplicationStatus shells out to `node scripts/db-write.mjs
-// update-status` which acquires the lockfile, updates the row, and refreshes
-// data/dashboard.json in a single Node invocation. This keeps the Go binary
-// CGo-free without requiring the duckdb CLI to be on PATH.
-func UpdateApplicationStatus(careerOpsPath string, app model.CareerApplication, newStatus string) error {
-	if app.Number <= 0 {
-		return fmt.Errorf("application has no id (Number=%d)", app.Number)
-	}
-
-	if _, err := os.Stat(duckDBPath(careerOpsPath)); err != nil {
-		return fmt.Errorf("duckdb file missing: %w", err)
-	}
-
-	dbWrite := filepath.Join(careerOpsPath, "scripts", "db-write.mjs")
-	cmd := exec.Command(
-		"node", dbWrite, "update-status",
-		fmt.Sprintf("--id=%d", app.Number),
-		fmt.Sprintf("--status=%s", newStatus),
-	)
-	cmd.Dir = careerOpsPath
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("db-write update-status failed: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// SnapshotFreshness reports whether data/dashboard.json is older than
-// data/career-ops.duckdb. Intended for display in the status bar so the user
-// can see when the snapshot has drifted from the DB.
-func SnapshotFreshness(careerOpsPath string) (label string, stale bool) {
-	snapInfo, snapErr := os.Stat(dashboardJSONPath(careerOpsPath))
-	dbInfo, dbErr := os.Stat(duckDBPath(careerOpsPath))
-	if snapErr != nil || dbErr != nil {
-		return "snapshot: unknown", true
-	}
-	diff := dbInfo.ModTime().Sub(snapInfo.ModTime())
-	if diff <= 0 {
-		return fmt.Sprintf("snapshot: fresh (%s)", humanAge(time.Since(snapInfo.ModTime()))), false
-	}
-	return fmt.Sprintf("snapshot: stale by %s", humanAge(diff)), true
-}
-
-func humanAge(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd", int(d.Hours())/24)
-}
-
-// ComputeMetrics calculates aggregate stats from applications.
+// ComputeMetrics calculates aggregate metrics from applications.
 func ComputeMetrics(apps []model.CareerApplication) model.PipelineMetrics {
 	m := model.PipelineMetrics{
 		Total:    len(apps),
@@ -236,37 +489,282 @@ func ComputeMetrics(apps []model.CareerApplication) model.PipelineMetrics {
 	return m
 }
 
-// NormalizeStatus maps raw status text to a canonical form. The DuckDB ENUM
-// already enforces canonical values, but legacy report bodies and hand-edited
-// entries may still leak through -- keep the normalizer as a belt-and-braces.
-// Aliases match states.yml.
+// NormalizeStatus normalizes raw status text to a canonical form.
+// Aliases match states.yml -- keep in sync with career-ops/states.yml
 func NormalizeStatus(raw string) string {
+	// Strip markdown bold and trailing dates
 	s := strings.ReplaceAll(raw, "**", "")
 	s = strings.TrimSpace(strings.ToLower(s))
+	// Strip trailing date (e.g., "aplicado 2026-03-12")
 	if idx := strings.Index(s, " 202"); idx > 0 {
 		s = strings.TrimSpace(s[:idx])
 	}
 
 	switch {
-	case s == "skip" || strings.Contains(s, "geo blocker"):
+	// Most restrictive first — accepts both English and Spanish
+	case strings.Contains(s, "no aplicar") || strings.Contains(s, "no_aplicar") || s == "skip" || strings.Contains(s, "geo blocker"):
 		return "skip"
-	case strings.Contains(s, "interview"):
+	case strings.Contains(s, "interview") || strings.Contains(s, "entrevista"):
 		return "interview"
-	case s == "offer":
+	case s == "offer" || strings.Contains(s, "oferta"):
 		return "offer"
-	case strings.Contains(s, "responded"):
+	case strings.Contains(s, "responded") || strings.Contains(s, "respondido"):
 		return "responded"
-	case strings.Contains(s, "applied") || s == "sent":
+	case strings.Contains(s, "applied") || strings.Contains(s, "aplicado") || s == "enviada" || s == "aplicada" || s == "sent":
 		return "applied"
-	case strings.Contains(s, "rejected"):
+	case strings.Contains(s, "rejected") || strings.Contains(s, "rechazado") || s == "rechazada":
 		return "rejected"
-	case strings.Contains(s, "discarded") || strings.HasPrefix(s, "dup"):
+	case strings.Contains(s, "discarded") || strings.Contains(s, "descartado") || s == "descartada" || s == "cerrada" || s == "cancelada" ||
+		strings.HasPrefix(s, "duplicado") || strings.HasPrefix(s, "dup"):
 		return "discarded"
-	case strings.Contains(s, "evaluated") || s == "hold" || s == "monitor":
+	case strings.Contains(s, "evaluated") || strings.Contains(s, "evaluada") || s == "condicional" || s == "hold" || s == "monitor" || s == "evaluar" || s == "verificar":
 		return "evaluated"
 	default:
 		return s
 	}
+}
+
+// LoadReportSummary extracts key fields from a report file.
+func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remote, comp string) {
+	fullPath := filepath.Join(careerOpsPath, reportPath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return
+	}
+	text := string(content)
+
+	if m := reArchetype.FindStringSubmatch(text); m != nil {
+		archetype = cleanTableCell(m[1])
+	} else if m := reArchetypeColon.FindStringSubmatch(text); m != nil {
+		archetype = cleanTableCell(m[1])
+	} else if m := reArchetypeYAML.FindStringSubmatch(text); m != nil {
+		archetype = strings.TrimSpace(m[1])
+	}
+
+	// Try table-format TL;DR first (most reports), then colon format
+	if m := reTlDr.FindStringSubmatch(text); m != nil {
+		tldr = cleanTableCell(m[1])
+	} else if m := reTlDrColon.FindStringSubmatch(text); m != nil {
+		tldr = cleanTableCell(m[1])
+	}
+
+	if m := reRemote.FindStringSubmatch(text); m != nil {
+		remote = cleanTableCell(m[1])
+	}
+
+	if m := reComp.FindStringSubmatch(text); m != nil {
+		comp = cleanTableCell(m[1])
+	}
+
+	// Truncate long fields
+	if len(tldr) > 120 {
+		tldr = tldr[:117] + "..."
+	}
+
+	return
+}
+
+// splitTrackerRow splits a tracker table line into trimmed cell values, using
+// the same delimiter logic as ParseApplications: a mixed "| " + tab-separated
+// body, or a pure pipe-delimited row. Field 0 is the first real column (num), so
+// the returned indices match the legacy layout (Status is field 5).
+func splitTrackerRow(line string) []string {
+	line = strings.TrimSpace(line)
+	var fields []string
+	if strings.Contains(line, "\t") {
+		// Mixed format: starts with "| " then tab-separated.
+		line = strings.TrimPrefix(line, "|")
+		line = strings.TrimSpace(line)
+		for _, p := range strings.Split(line, "\t") {
+			fields = append(fields, strings.TrimSpace(strings.Trim(p, "|")))
+		}
+	} else {
+		// Pure pipe format.
+		line = strings.Trim(line, "|")
+		for _, p := range strings.Split(line, "|") {
+			fields = append(fields, strings.TrimSpace(p))
+		}
+	}
+	return fields
+}
+
+// trackerHeaderAliases maps a lowercased header cell to a canonical field name.
+// Mirrors HEADER_ALIASES in tracker-parse.mjs (including the Spanish aliases) so
+// the Go data layer tolerates the same customized layouts as the Node tracker
+// tooling after #954.
+var trackerHeaderAliases = map[string]string{
+	"#": "num", "num": "num", "date": "date",
+	"company": "company", "empresa": "company",
+	"role": "role", "puesto": "role",
+	"location": "location", "score": "score", "status": "status",
+	"pdf": "pdf", "report": "report", "notes": "notes",
+}
+
+// legacyTrackerColumns is the original fixed layout in splitTrackerRow field
+// space (num=0 … notes=8), used when no recognizable header row is present.
+var legacyTrackerColumns = map[string]int{
+	"num": 0, "date": 1, "company": 2, "role": 3, "score": 4,
+	"status": 5, "pdf": 6, "report": 7, "notes": 8,
+}
+
+// detectTrackerColumns scans for the table header row and maps canonical field
+// names to column indices in splitTrackerRow field space. It returns nil unless
+// the essential columns are all present, so a stray pipe line cannot yield a
+// bogus mapping and the caller falls back to legacyTrackerColumns. Mirrors
+// detectColumns in tracker-parse.mjs (#954).
+func detectTrackerColumns(lines []string) map[string]int {
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		cells := splitTrackerRow(line)
+		m := make(map[string]int)
+		for i, c := range cells {
+			if name, ok := trackerHeaderAliases[strings.ToLower(c)]; ok {
+				if _, seen := m[name]; !seen {
+					m[name] = i
+				}
+			}
+		}
+		complete := true
+		for _, k := range []string{"num", "company", "role", "score", "status"} {
+			if _, ok := m[k]; !ok {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return m
+		}
+	}
+	return nil
+}
+
+// resolveTrackerColumns returns the header-detected column map, falling back to
+// the legacy fixed layout when no header row is found.
+func resolveTrackerColumns(lines []string) map[string]int {
+	if m := detectTrackerColumns(lines); m != nil {
+		return m
+	}
+	return legacyTrackerColumns
+}
+
+// UpdateApplicationStatus updates the status of an application in applications.md.
+func UpdateApplicationStatus(careerOpsPath string, app model.CareerApplication, newStatus string) error {
+	filePath := filepath.Join(careerOpsPath, "applications.md")
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		filePath = filepath.Join(careerOpsPath, "data", "applications.md")
+		content, err = os.ReadFile(filePath)
+		if err != nil {
+			return err
+		}
+	}
+
+	lines := strings.Split(string(content), "\n")
+	found := false
+
+	// Locate the Status column by header name so a customized layout (e.g. an
+	// inserted Location column) is written to the right cell. Falls back to the
+	// legacy fixed index when no header is present.
+	statusIdx := resolveTrackerColumns(lines)["status"]
+
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		// Match by report number
+		if app.ReportNumber != "" && strings.Contains(line, fmt.Sprintf("[%s]", app.ReportNumber)) {
+			// Replace the status field
+			lines[i] = replaceStatusInLine(line, app.Status, newStatus, statusIdx)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("application not found: report %s", app.ReportNumber)
+	}
+
+	return os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// replaceStatusInLine rewrites only the Status cell of a tracker row, leaving
+// every other cell untouched. The previous implementation used
+// strings.Replace(line, oldStatus, …, 1), which replaces the first occurrence of
+// the status text anywhere in the row — so a status word appearing as a
+// substring of an earlier cell (e.g. Company "Applied Materials") was rewritten
+// instead of the Status cell, corrupting that cell while the status appeared to
+// stay unchanged (#1180). Matching is whole-cell (never a substring) and, as the
+// old comment claimed but the code did not, case-insensitive.
+//
+// statusField is the Status column index in splitTrackerRow field space (5 in
+// the legacy layout), resolved from the table header so a customized layout
+// (e.g. an inserted Location column) targets the right cell.
+func replaceStatusInLine(line, oldStatus, newStatus string, statusField int) string {
+	want := strings.TrimSpace(oldStatus)
+
+	// Mixed "| " + tab-separated format (mirrors ParseApplications). The body is
+	// tab-split, so cell index equals the field index.
+	if strings.Contains(line, "\t") {
+		prefix, body, found := strings.Cut(line, "|")
+		if !found {
+			return line
+		}
+		cells := strings.Split(body, "\t")
+		if idx := statusCellIndex(cells, statusField, want); idx >= 0 {
+			cells[idx] = spliceCellValue(cells[idx], newStatus)
+			return prefix + "|" + strings.Join(cells, "\t")
+		}
+		return line
+	}
+
+	// Pure pipe format. strings.Split keeps the segments between pipes; content
+	// cell N is segment N+1 (segment 0 is the empty text before the leading
+	// pipe), so the Status field maps to segment statusField+1.
+	segments := strings.Split(line, "|")
+	if idx := statusCellIndex(segments, statusField+1, want); idx >= 0 {
+		segments[idx] = spliceCellValue(segments[idx], newStatus)
+		return strings.Join(segments, "|")
+	}
+	return line
+}
+
+// statusCellIndex returns the index of the Status cell. It prefers the canonical
+// column (canonicalIdx, matching ParseApplications) and verifies it by value; if
+// that doesn't match — e.g. a custom tracker layout — it falls back to the first
+// cell that equals want exactly. Matching is whole-cell and case-insensitive,
+// never a substring, so a status word inside an earlier cell is never hit.
+// Returns -1 when nothing matches, so the caller leaves the row untouched rather
+// than corrupt a guess.
+func statusCellIndex(cells []string, canonicalIdx int, want string) int {
+	if canonicalIdx < len(cells) && strings.EqualFold(strings.TrimSpace(cells[canonicalIdx]), want) {
+		return canonicalIdx
+	}
+	for i, c := range cells {
+		if strings.EqualFold(strings.TrimSpace(c), want) {
+			return i
+		}
+	}
+	return -1
+}
+
+// spliceCellValue swaps a cell's inner value while preserving its surrounding
+// whitespace, so "| Applied |" becomes "| Interview |" rather than "|Interview|".
+func spliceCellValue(cell, newVal string) string {
+	trimmed := strings.TrimSpace(cell)
+	if trimmed == "" {
+		return cell
+	}
+	start := strings.Index(cell, trimmed)
+	return cell[:start] + newVal + cell[start+len(trimmed):]
+}
+
+// cleanTableCell removes trailing pipes and whitespace from a table cell value.
+func cleanTableCell(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimRight(s, "|")
+	return strings.TrimSpace(s)
 }
 
 // StatusPriority returns the sort priority for a status (lower = higher priority).
