@@ -216,7 +216,7 @@ def compute_global(
     and optional diagnostics.
     """
     cfg = config or ScoreConfig()
-    weights = cfg.weights if cfg.weights != ScoreConfig().weights else _DEFAULT_WEIGHTS
+    weights = {**_DEFAULT_WEIGHTS, **cfg.weights}
 
     dim_scores = {
         "CV Match": score_cv_match(features.requirements),
