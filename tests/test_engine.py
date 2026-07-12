@@ -11,7 +11,7 @@ from scoring.engine import (
     score_level_fit,
     score_org_risk,
 )
-from scoring.models import Blocker, JDFeatures, OrgSignals, Requirement
+from scoring.models import Blocker, JDFeatures, OrgSignals, Requirement, ScoreConfig
 
 
 ###############################################################################
@@ -423,6 +423,22 @@ class TestComputeGlobal:
     def test_dimensions_list_has_six_entries(self):
         result = compute_global(_make_features())
         assert len(result.dimensions) == 6
+
+    def test_partial_weights_override_does_not_crash(self):
+        # A partial weights override must fill missing dimensions from defaults,
+        # not raise KeyError on the first unspecified dimension.
+        result = compute_global(
+            _make_features(),
+            config=ScoreConfig(weights={"CV Match": 0.5}),
+        )
+        assert len(result.dimensions) == 6
+        by_name = {d.name: d.weight for d in result.dimensions}
+        assert by_name["CV Match"] == 0.5
+        assert by_name["Archetype Fit"] == 0.20
+        assert by_name["Comp Alignment"] == 0.20
+        assert by_name["Level Fit"] == 0.15
+        assert by_name["Org Risk"] == 0.10
+        assert by_name["Blockers"] == 0.10
 
     def test_weighted_values_sum_to_global(self):
         result = compute_global(_make_features())
