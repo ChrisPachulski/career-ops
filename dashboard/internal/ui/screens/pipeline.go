@@ -1367,7 +1367,7 @@ func (m PipelineModel) renderPreview() string {
 	divider := lipgloss.NewStyle().Foreground(m.theme.Overlay)
 
 	var lines []string
-	lines = append(lines, padStyle.Render(divider.Render(strings.Repeat("─", m.width-4))))
+	lines = append(lines, padStyle.Render(divider.Render(strings.Repeat("─", max(0, m.width-4)))))
 
 	labelStyle := lipgloss.NewStyle().Foreground(m.theme.Sky).Bold(true)
 	valueStyle := lipgloss.NewStyle().Foreground(m.theme.Text)
@@ -1691,7 +1691,10 @@ func formatTimeAgo(dateStr string) string {
 }
 
 // truncateRunes truncates a string to at most maxRunes runes, appending "..." if truncated.
+// maxRunes is clamped to 0 so a narrow terminal (width subtraction going negative) can't
+// drive a negative slice bound.
 func truncateRunes(s string, maxRunes int) string {
+	maxRunes = max(0, maxRunes)
 	runes := []rune(s)
 	if len(runes) <= maxRunes {
 		return s

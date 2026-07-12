@@ -581,3 +581,46 @@ func TestWithReloadedDataPreservesCursorWhenAppRemoved(t *testing.T) {
 	}
 }
 
+// Regression: on a narrow terminal, m.width-4/-10/-14 go negative, which used to
+// panic — strings.Repeat with a negative count, and truncateRunes slicing runes
+// with a negative upper bound (runes[:maxRunes]).
+func TestRenderPreviewOnNarrowTerminalDoesNotPanic(t *testing.T) {
+	app := model.CareerApplication{
+		Company: "Acme",
+		Role:    "Backend Engineer",
+		Status:  "SKIP",
+		Notes:   "notes long enough to require truncation on a narrow terminal",
+	}
+
+	for _, width := range []int{0, 1, 4, 8, 10, 13, 14, 20} {
+		pm := NewPipelineModel(
+			theme.NewTheme("catppuccin-mocha"),
+			[]model.CareerApplication{app},
+			model.PipelineMetrics{Total: 1},
+			"..",
+			width,
+			40,
+		)
+		pm.applyFilterAndSort()
+		pm.cursor = 0
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("renderPreview panicked at width=%d: %v", width, r)
+				}
+			}()
+			pm.renderPreview()
+		}()
+	}
+}
+
+func TestTruncateRunesClampsNegativeMaxRunes(t *testing.T) {
+	if got := truncateRunes("hello world", -5); got != "" {
+		t.Fatalf("expected empty string for negative maxRunes, got %q", got)
+	}
+	if got := truncateRunes("hello world", 0); got != "" {
+		t.Fatalf("expected empty string for zero maxRunes, got %q", got)
+	}
+}
+
