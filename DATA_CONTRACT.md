@@ -65,3 +65,34 @@ These files contain system logic, scripts, templates, and instructions that impr
 **If a file is in the User Layer, no update process may read, modify, or delete it.**
 
 **If a file is in the System Layer, it can be safely replaced with the latest version from the upstream repo.**
+
+## Personalization Request Map
+
+Common customization requests and where the agent should write them:
+
+| Request | Target file |
+|---------|-------------|
+| Change archetypes to a different role family | `modes/_profile.md` or `config/profile.yml` |
+| Translate the modes to another language | all files in `modes/` (see `HANDBOOK.md` for existing language sets) |
+| Add companies to the portal scan | `portals.yml` |
+| Update profile (name, comp, targets) | `config/profile.yml` |
+| Change the CV template design | `templates/cv-template.html` |
+| Adjust scoring weights (user-specific) | `modes/_profile.md` |
+| Adjust scoring weights (shared defaults for everyone) | `modes/_shared.md` and `batch/batch-prompt.md` |
+
+## Canonical States (`applications.status` ENUM)
+
+Source of truth: `templates/states.yml`.
+
+| State | When to use |
+|-------|-------------|
+| `Evaluated` | Report completed, pending decision |
+| `Applied` | Application sent |
+| `Responded` | Company responded |
+| `Interview` | In interview process |
+| `Offer` | Offer received |
+| `Rejected` | Rejected by company |
+| `Discarded` | Discarded by candidate or offer closed |
+| `SKIP` | Doesn't fit, don't apply |
+
+Rules: no markdown bold (`**`) in the status field, no dates in the status field (use the date column), no extra text (use the notes column).

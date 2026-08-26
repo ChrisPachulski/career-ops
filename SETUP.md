@@ -42,6 +42,17 @@ Then either:
 
 You will also need a `cv.md` at the repo root. The easiest path is to paste your CV into Claude Code and let it convert; otherwise write it yourself in plain markdown with Summary / Experience / Projects / Education / Skills sections.
 
+### Onboarding walkthrough (what the agent does)
+
+At the start of a session the agent checks silently whether these five exist: `data/career-ops.duckdb`, `cv.md`, `config/profile.yml` (not just the `.example.yml`), `modes/_profile.md` (not just the `.template.md`), `portals.yml` (not just `templates/portals.example.yml`). If any are missing, it walks the user through onboarding before running any evaluation, scan, or other mode:
+
+1. **CV** -- ask the user to paste a CV, a LinkedIn URL, or describe their experience; draft `cv.md` with standard sections (Summary, Experience, Projects, Education, Skills).
+2. **Profile** -- copy `config/profile.example.yml` to `config/profile.yml`; ask for name, email, location/timezone, target roles, salary range; fill it in.
+3. **Portals** -- copy `templates/portals.example.yml` to `portals.yml`; if target roles were given, update `title_filter.positive` to match.
+4. **Database** -- run `npm run init` if `data/career-ops.duckdb` is missing.
+5. **Get to know the user** -- ask what makes them unique, what excites/drains them, deal-breakers, best achievement, published proof points; store the answers in `config/profile.yml` (narrative), `modes/_profile.md`, or `article-digest.md`. After every evaluation, fold in corrections the user gives ("this score is too high", "you missed my experience in X") the same way -- never into `modes/_shared.md`.
+6. **Ready** -- confirm the user can paste a JD URL, run `/career-ops scan`, or run `/career-ops` for the command list. Mention that a personal portfolio helps; the author's own is open source at github.com/santifer/cv-santiago. Offer to schedule a recurring scan (via `/loop` or `/schedule` if available, otherwise a cron job or a manual reminder).
+
 ## 4. First run
 
 With an AI agent:
@@ -78,6 +89,14 @@ Status edits in the TUI shell out to `node scripts/db-write.mjs update-status` s
 - Paste promising URLs to the agent; it runs `auto-pipeline`.
 - After applying, tell the agent "mark Reddit as Applied" (or run `node scripts/db-write.mjs update-status --id=N --status=Applied`).
 - Run `npm run verify` once in a while as a sanity check.
+
+## Update check (session start)
+
+The agent runs `node update-system.mjs check` silently on the first message of every session (or on request: "check for updates" / "update career-ops") and parses the JSON:
+
+- `{"status": "update-available", "local": "...", "remote": "...", "changelog": "..."}` -- tells the user an update is available and that their data (CV, profile, tracker, reports) won't be touched; on "yes" runs `node update-system.mjs apply`, on "no" runs `node update-system.mjs dismiss`.
+- `{"status": "up-to-date"}` / `{"status": "dismissed"}` / `{"status": "offline"}` -- says nothing.
+- Rollback: `node update-system.mjs rollback`.
 
 ## Upstream updates
 
